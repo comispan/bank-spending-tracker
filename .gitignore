@@ -1,0 +1,10 @@
+# Real financial data must never be committed.
+spike/statements/
+spike/out/
+spike/passwords.json
+
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store

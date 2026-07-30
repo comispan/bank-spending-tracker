@@ -1,0 +1,83 @@
+# Phase 0 spike
+
+**Question this answers:** can we extract transactions from a statement PDF and *prove* the extraction is correct — and on which of your banks does it fail?
+
+Nothing here is production code. Answer the question, throw it away, then build Phase 1 knowing what you're up against.
+
+## Run it on your machine, not in a cloud session
+
+Statements are among the most sensitive documents you own. Keep them local.
+`spike/statements/`, `spike/out/`, and `passwords.json` are all gitignored — check that before you copy anything in.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r spike/requirements.txt
+```
+
+## Step 1 — smoke-test (no real data, no network)
+
+```bash
+python spike/make_sample.py       # writes a synthetic statement
+python spike/extract.py --dry-run
+```
+
+Confirms the plumbing works before you point it at anything real.
+
+## Step 2 — text extraction on your statements (still no network)
+
+Drop 5–10 real PDFs into `spike/statements/`, then:
+
+```bash
+python spike/extract.py --dry-run
+```
+
+This **sends nothing anywhere.** It writes each statement's extracted text to `spike/out/<name>.txt`. Open a few and check whether the transaction table survived — columns aligned, amounts on the right row, dates intact.
+
+This step alone is worth doing carefully. If the text comes out scrambled or empty, no amount of LLM cleverness downstream will fix it, and you've learned that for free.
+
+If a statement is password-protected, create `spike/passwords.json`:
+
+```json
+{ "dbs-jun-2026.pdf": "S1234567A", "ocbc-jun-2026.pdf": "0512" }
+```
+
+## Step 3 — full pipeline
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+python spike/extract.py
+```
+
+Per page: text → Claude → structured JSON → merged → **reconciled against the statement's own printed totals.**
+
+Card numbers are masked to last-4 before any text leaves the machine (`redact()` in `extract.py`), but understand that the rest of the page — merchants, amounts, dates — does go to the API. That's the tradeoff this step is testing. If it's not one you want to make, stop after Step 2; the answer is that you need per-bank template parsers instead, and the design changes accordingly.
+
+Costs roughly a cent or two per statement.
+
+## Reading the output
+
+```
+statement              pages  txns  verdict     detail
+dbs-jun-2026.pdf           4    47  PASS        matches printed totals
+ocbc-jun-2026.pdf          3    31  PASS        balance rolls forward (card convention)
+citi-jun-2026.pdf          6    52  FAIL        debits off by 412.00
+amex-jun-2026.pdf          2     0  ERROR       encrypted (no password supplied)
+uob-scan.pdf               5     0  UNVERIFIED  statement prints no totals to check against
+                                 !  5/5 page(s) have no text layer — needs OCR
+```
+
+| Verdict | Meaning |
+|---|---|
+| `PASS` | Numbers reconcile. Trustworthy. |
+| `FAIL` | Extraction is wrong, or the statement has a quirk the parser missed. **Investigate every one** — the `detail` delta often names the missing transaction outright. |
+| `UNVERIFIED` | Parsed, but the statement prints no totals to check against. Not the same as correct. |
+| `ERROR` | Couldn't read the file at all. |
+
+## What the result means
+
+- **Most statements PASS** → the design in `../DESIGN.md` holds. Go to Phase 1.
+- **Systematic FAILs at one bank** → look at that bank's `out/*.txt`. Usually a layout the text extractor mangles, or a section (fees, FX sublines, instalments) not being counted. Cheap to fix.
+- **FAILs scattered everywhere** → the LLM-first approach is too loose. Fall back to per-bank template parsers, and expect real work per bank.
+- **Mostly `UNVERIFIED`** → the trust gate can't function. This is the worst outcome, because it means you can never distinguish a good parse from a bad one automatically. Revisit before building further.
+
+Record the verdict table in the PR or an issue. It's the input to every Phase 1 decision.
