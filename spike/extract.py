@@ -35,6 +35,36 @@ SCAN_CHAR_THRESHOLD = 100         # below this, the page is almost certainly an 
 DATE_SLACK_DAYS = 5               # posting lag outside the statement period
 
 
+# ------------------------------------------------------------------- text io
+#
+# Every text read and write in this file goes through these two functions.
+# Nothing calls Path.read_text/write_text or bare open() in text mode directly,
+# because those inherit the platform's locale encoding — cp1252 on Windows —
+# and statements are full of characters it cannot represent.
+
+def write_text(path: Path, data: str) -> None:
+    """Output is UTF-8 with LF endings on every platform. Not negotiable."""
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(data)
+
+
+def read_text(path: Path) -> str:
+    """Decode a file we did not write.
+
+    We control our own output, but not passwords.json — a Windows editor may
+    save it as cp1252 and Notepad prepends a BOM. Try the plausible encodings
+    in order rather than making the user care which one they used.
+    """
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    # Last resort: never fail a run over an undecodable byte.
+    return raw.decode("utf-8", errors="replace")
+
+
 # ---------------------------------------------------------------- redaction
 
 def redact(text: str) -> str:
@@ -295,10 +325,7 @@ def process(path: Path, passwords: dict, dry_run: bool, client) -> Result:
 
     if dry_run:
         dump = OUT / f"{path.stem}.txt"
-        dump.write_text(
-            "\n\n".join(f"===== page {p.number} =====\n{p.text}" for p in pages),
-            encoding="utf-8",
-        )
+        write_text(dump, "\n\n".join(f"===== page {p.number} =====\n{p.text}" for p in pages))
         r.verdict = "TEXT-ONLY"
         r.detail = f"wrote {dump.relative_to(HERE)} — eyeball whether the table survived"
         return r
@@ -322,9 +349,7 @@ def process(path: Path, passwords: dict, dry_run: bool, client) -> Result:
     reconcile(stmt, r)
     sanity_checks(stmt, r)
 
-    (OUT / f"{path.stem}.json").write_text(
-        json.dumps(stmt, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    write_text(OUT / f"{path.stem}.json", json.dumps(stmt, indent=2, ensure_ascii=False))
     return r
 
 
@@ -348,7 +373,7 @@ def main() -> int:
     STATEMENTS.mkdir(parents=True, exist_ok=True)
 
     pw_file = HERE / "passwords.json"
-    passwords = json.loads(pw_file.read_text(encoding="utf-8")) if pw_file.exists() else {}
+    passwords = json.loads(read_text(pw_file)) if pw_file.exists() else {}
 
     files = [Path(args.file)] if args.file else sorted(STATEMENTS.glob("*.pdf"))
     if not files:
