@@ -92,6 +92,71 @@ def test_no_call_site_bypasses_the_helpers() -> None:
           not offenders, "; ".join(offenders))
 
 
+def test_encryption_paths() -> None:
+    """A statement encrypted only to set permission flags has an empty user
+    password and must open without one. DBS ships statements like this."""
+    print("\nencrypted pdfs")
+    import pypdf
+    from extract import read_pdf
+
+    tmp = Path(tempfile.mkdtemp())
+
+    def make(name: str, user_pw: str | None) -> Path:
+        w = pypdf.PdfWriter()
+        w.add_blank_page(width=595, height=842)
+        if user_pw is not None:
+            w.encrypt(user_password=user_pw, owner_password="owner")
+        dst = tmp / name
+        with open(dst, "wb") as fh:
+            w.write(fh)
+        return dst
+
+    empty_pw = make("empty.pdf", "")
+    locked = make("locked.pdf", "S1234567A")
+    plain = make("plain.pdf", None)
+
+    for label, path, pw, want_err in [
+        ("permissions-only encryption opens with no password", empty_pw, None, False),
+        ("locked file opens with the right password", locked, "S1234567A", False),
+        ("locked file rejects the wrong password", locked, "nope", True),
+        ("locked file reports a missing password", locked, None, True),
+        ("unencrypted file opens", plain, None, False),
+    ]:
+        _, err = read_pdf(path, pw)
+        check(label, (err is not None) == want_err, f"err={err}")
+
+
+def test_row_detection() -> None:
+    """The dry-run row count is what tells you the table survived extraction."""
+    print("\ntransaction-row detection")
+    from extract import Page, count_txn_shaped_lines
+
+    def page(*lines: str) -> Page:
+        text = "\n".join(lines)
+        return Page(number=1, text=text, char_count=len(text))
+
+    formats = {
+        "DD MMM":       "  15 JUN    16 JUN    FAIRPRICE FINEST 203              82.15",
+        "DD/MM":        "  15/06  GRAB *TRIP 4821                              14.20",
+        "DD-MM-YYYY":   "  15-06-2026  NETFLIX.COM                             19.98",
+        "MMM DD":       "  JUN 15  STARBUCKS RAFFLES CITY                       7.80",
+        "ISO":          "  2026-06-15  UNIQLO ION ORCHARD                      89.90",
+        "credit (CR)":  "  10 JUL    PAYMENT - THANK YOU                  1,200.00 CR",
+        "thousands":    "  03 JUL    BOOKING.COM AMSTERDAM                 1,412.00",
+    }
+    for label, line in formats.items():
+        check(f"matches {label}", count_txn_shaped_lines([page(line)]) == 1, repr(line))
+
+    non_rows = [
+        "  Interest at 27.8% p.a. applies to unpaid balances.",
+        "  Previous Balance                                    1,204.55",   # no leading date
+        "       FOREIGN CURRENCY EUR 285.00 @ 1.4456",                      # subline, no amount col
+        "  TRANS DATE POST DATE DESCRIPTION            AMOUNT (SGD)",
+        "",
+    ]
+    check("ignores non-transaction lines", count_txn_shaped_lines([page(*non_rows)]) == 0)
+
+
 def test_reconciliation() -> None:
     print("\nreconciliation gate")
 
@@ -148,6 +213,8 @@ if __name__ == "__main__":
     test_write_is_platform_independent()
     test_read_is_tolerant()
     test_no_call_site_bypasses_the_helpers()
+    test_encryption_paths()
+    test_row_detection()
     test_reconciliation()
     test_sanity_checks()
 

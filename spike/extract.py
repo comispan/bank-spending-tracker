@@ -67,6 +67,27 @@ def read_text(path: Path) -> str:
 
 # ---------------------------------------------------------------- redaction
 
+# A transaction row, heuristically: starts with a date, ends with an amount.
+# Only used to judge whether the table survived text extraction — the real
+# parsing is done by the model.
+TXN_DATE = re.compile(
+    r"^\s*(?:"
+    r"\d{1,2}[ /-](?:\d{1,2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:[ /-]\d{2,4})?"
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[ /-]\d{1,2}"
+    r"|\d{4}-\d{2}-\d{2}"
+    r")\b", re.I)
+TXN_AMOUNT = re.compile(r"\d{1,3}(?:,\d{3})*\.\d{2}\s*(?:cr|dr)?\s*$", re.I)
+
+
+def count_txn_shaped_lines(pages: list[Page]) -> int:
+    return sum(
+        1
+        for p in pages
+        for line in p.text.splitlines()
+        if TXN_DATE.match(line) and TXN_AMOUNT.search(line)
+    )
+
+
 def redact(text: str) -> str:
     """Strip full card numbers before anything leaves the machine.
 
@@ -100,10 +121,16 @@ def read_pdf(path: Path, password: str | None) -> tuple[list[Page], str | None]:
 
     reader = pypdf.PdfReader(str(path))
     if reader.is_encrypted:
-        if not password:
-            return [], "encrypted (no password supplied — add it to passwords.json)"
-        if reader.decrypt(password) == 0:
-            return [], "encrypted (supplied password rejected)"
+        # Plenty of issuers encrypt a statement purely to set permission flags
+        # (no printing, no copying) and leave the user password empty, so the
+        # file opens with no password at all. Always try that before asking the
+        # user for one — DBS does this.
+        if reader.decrypt("") == 0:
+            if not password:
+                return [], "encrypted (no password supplied — add it to passwords.json)"
+            if reader.decrypt(password) == 0:
+                return [], "encrypted (supplied password rejected)"
+
         # pdfplumber can't take an already-decrypted pypdf reader, so write a
         # decrypted copy to a temp path and read that.
         writer = pypdf.PdfWriter()
@@ -326,8 +353,13 @@ def process(path: Path, passwords: dict, dry_run: bool, client) -> Result:
     if dry_run:
         dump = OUT / f"{path.stem}.txt"
         write_text(dump, "\n\n".join(f"===== page {p.number} =====\n{p.text}" for p in pages))
-        r.verdict = "TEXT-ONLY"
-        r.detail = f"wrote {dump.relative_to(HERE)} — eyeball whether the table survived"
+        r.txns = count_txn_shaped_lines(pages)
+        if r.txns:
+            r.verdict = "TABLE-OK"
+            r.detail = f"{r.txns} transaction-shaped rows survived — see {dump.name}"
+        else:
+            r.verdict = "NO-TABLE"
+            r.detail = f"no date+amount rows found — inspect {dump.name} before spending API calls"
         return r
 
     hint = ""
@@ -391,7 +423,7 @@ def main() -> int:
     results = [process(f, passwords, args.dry_run, client) for f in files]
 
     width = max(len(r.name) for r in results)
-    print(f"\n{'statement'.ljust(width)}  {'pages':>5} {'txns':>5}  verdict     detail")
+    print(f"\n{'statement'.ljust(width)}  {'pages':>5} {'rows':>5}  verdict     detail")
     print("-" * (width + 60))
     for r in results:
         print(f"{r.name.ljust(width)}  {r.pages:>5} {r.txns:>5}  {r.verdict:<11} {r.detail}")

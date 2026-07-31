@@ -51,10 +51,18 @@ This **sends nothing anywhere.** It writes each statement's extracted text to `s
 
 This step alone is worth doing carefully. If the text comes out scrambled or empty, no amount of LLM cleverness downstream will fix it, and you've learned that for free.
 
-If a statement is password-protected, create `spike/passwords.json`:
+The `rows` column counts lines that start with a date and end with an amount — a rough count of surviving transaction rows. `TABLE-OK` means the table structure made it through; `NO-TABLE` means inspect the `.txt` before spending any API calls on that bank.
+
+### Encrypted statements
+
+Many issuers encrypt statements only to set permission flags (no printing, no
+copying) and leave the user password *empty* — DBS does this. Those open with no
+password at all, and the tool tries that automatically before asking for one.
+
+If a statement is genuinely locked, create `spike/passwords.json`:
 
 ```json
-{ "dbs-jun-2026.pdf": "S1234567A", "ocbc-jun-2026.pdf": "0512" }
+{ "uob-jun-2026.pdf": "S1234567A", "ocbc-jun-2026.pdf": "0512" }
 ```
 
 ## Step 3 — full pipeline
@@ -73,14 +81,17 @@ Costs roughly a cent or two per statement.
 ## Reading the output
 
 ```
-statement              pages  txns  verdict     detail
+statement              pages  rows  verdict     detail
 dbs-jun-2026.pdf           4    47  PASS        matches printed totals
 ocbc-jun-2026.pdf          3    31  PASS        balance rolls forward (card convention)
 citi-jun-2026.pdf          6    52  FAIL        debits off by 412.00
-amex-jun-2026.pdf          2     0  ERROR       encrypted (no password supplied)
+amex-jun-2026.pdf          2     0  ERROR       encrypted (supplied password rejected)
 uob-scan.pdf               5     0  UNVERIFIED  statement prints no totals to check against
                                  !  5/5 page(s) have no text layer — needs OCR
 ```
+
+In `--dry-run` the verdict is `TABLE-OK` or `NO-TABLE` instead, since nothing
+has been parsed yet.
 
 | Verdict | Meaning |
 |---|---|
