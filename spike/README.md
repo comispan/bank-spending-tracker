@@ -17,11 +17,27 @@ pip install -r spike/requirements.txt
 ## Step 1 — smoke-test (no real data, no network)
 
 ```bash
+python spike/selftest.py          # checks encoding + the reconciliation gate
 python spike/make_sample.py       # writes a synthetic statement
 python spike/extract.py --dry-run
 ```
 
-Confirms the plumbing works before you point it at anything real.
+Confirms the plumbing works before you point it at anything real. `selftest.py`
+needs no API key and touches no statements; run it first if anything misbehaves,
+since it isolates a broken environment from a bad parse.
+
+### A note on text encoding
+
+All output is written as UTF-8 with LF endings on every platform, via the
+`write_text`/`read_text` helpers in `extract.py`. Nothing calls Python's
+`Path.read_text`/`write_text` directly — those inherit the platform's locale
+encoding (cp1252 on Windows), which cannot represent characters that genuinely
+appear in statements, and the failure is a mid-run crash. `selftest.py` audits
+the source for that mistake, so a future edit that reintroduces it fails loudly.
+
+Files we *don't* write — currently just `passwords.json` — are decoded
+tolerantly (UTF-8, UTF-8-with-BOM, then cp1252), so it doesn't matter which
+editor you used to create it.
 
 ## Step 2 — text extraction on your statements (still no network)
 
