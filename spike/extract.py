@@ -295,7 +295,10 @@ def process(path: Path, passwords: dict, dry_run: bool, client) -> Result:
 
     if dry_run:
         dump = OUT / f"{path.stem}.txt"
-        dump.write_text("\n\n".join(f"===== page {p.number} =====\n{p.text}" for p in pages))
+        dump.write_text(
+            "\n\n".join(f"===== page {p.number} =====\n{p.text}" for p in pages),
+            encoding="utf-8",
+        )
         r.verdict = "TEXT-ONLY"
         r.detail = f"wrote {dump.relative_to(HERE)} — eyeball whether the table survived"
         return r
@@ -319,11 +322,22 @@ def process(path: Path, passwords: dict, dry_run: bool, client) -> Result:
     reconcile(stmt, r)
     sanity_checks(stmt, r)
 
-    (OUT / f"{path.stem}.json").write_text(json.dumps(stmt, indent=2))
+    (OUT / f"{path.stem}.json").write_text(
+        json.dumps(stmt, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return r
 
 
 def main() -> int:
+    # Windows consoles default to cp1252, which blows up on the symbols banks
+    # like to put in statements (✈, é, —). Never let a printable character
+    # crash the run.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="extract text only; nothing leaves this machine")
@@ -334,7 +348,7 @@ def main() -> int:
     STATEMENTS.mkdir(parents=True, exist_ok=True)
 
     pw_file = HERE / "passwords.json"
-    passwords = json.loads(pw_file.read_text()) if pw_file.exists() else {}
+    passwords = json.loads(pw_file.read_text(encoding="utf-8")) if pw_file.exists() else {}
 
     files = [Path(args.file)] if args.file else sorted(STATEMENTS.glob("*.pdf"))
     if not files:
