@@ -76,7 +76,28 @@ Per page: text → Claude → structured JSON → merged → **reconciled agains
 
 Card numbers are masked to last-4 before any text leaves the machine (`redact()` in `extract.py`), but understand that the rest of the page — merchants, amounts, dates — does go to the API. That's the tradeoff this step is testing. If it's not one you want to make, stop after Step 2; the answer is that you need per-bank template parsers instead, and the design changes accordingly.
 
-Costs roughly a cent or two per statement.
+### Getting an API key
+
+The Anthropic API is **billed separately from a Claude Pro/Max subscription** — a subscription includes no API credits, and this is the most common surprise. Go to **console.anthropic.com** → Settings → API Keys → Create Key, then add a payment method and buy credits (minimum is small; see below).
+
+The key is shown once. Store it outside the repo — `export ANTHROPIC_API_KEY=...` in your shell profile, not in a file here.
+
+### What it costs
+
+Runs on `claude-opus-5` by default. For 5 statements at ~4 pages each, expect **well under $2** for the whole spike. Concretely, at roughly 3K input / 1.5K output tokens per page and Opus 5's $5/$25 per million:
+
+| Model | Per page | 20 pages |
+|---|---|---|
+| `claude-opus-5` (default) | ~$0.05 | ~$1.05 |
+| `claude-sonnet-5` | ~$0.02 | ~$0.42 |
+
+Run the default first. The spike is asking *whether extraction is possible at all*, so a failure should mean the approach is hard — not that you economized on the model. Once it passes:
+
+```bash
+SPIKE_MODEL=claude-sonnet-5 python spike/extract.py
+```
+
+If Sonnet reconciles just as cleanly, use it in production and pocket the difference. That comparison is worth running — at real volume the gap compounds, and it's cheap to measure now.
 
 ## Reading the output
 
