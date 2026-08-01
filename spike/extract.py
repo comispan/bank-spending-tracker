@@ -29,7 +29,12 @@ HERE = Path(__file__).parent
 STATEMENTS = HERE / "statements"
 OUT = HERE / "out"
 
-MODEL = "claude-sonnet-5"
+# Opus 5 by default: the spike is measuring whether extraction is *possible*,
+# so run it at full strength. The whole run costs about a dollar either way.
+# Once it passes, re-run with MODEL=claude-sonnet-5 to see if the cheaper model
+# holds up — that's the number that matters for production, not for this.
+MODEL = os.environ.get("SPIKE_MODEL", "claude-opus-5")
+MAX_TOKENS = 16000                # thinking + JSON share this budget on Opus 5
 TOLERANCE = Decimal("0.01")       # a cent of rounding slack
 SCAN_CHAR_THRESHOLD = 100         # below this, the page is almost certainly an image
 DATE_SLACK_DAYS = 5               # posting lag outside the statement period
@@ -178,8 +183,14 @@ Rules:
 TOOL = {
     "name": "record_page",
     "description": "Record structured data extracted from one statement page.",
+    # strict mode guarantees the input validates against this schema exactly,
+    # so a malformed extraction fails loudly at the API instead of quietly
+    # producing a half-parsed statement. Requires every property listed in
+    # `required` and additionalProperties false — optional fields are nullable.
+    "strict": True,
     "input_schema": {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "issuer": {"type": ["string", "null"], "description": "Bank/issuer name if printed on this page"},
             "account_last4": {"type": ["string", "null"]},
@@ -194,6 +205,7 @@ TOOL = {
                 "type": "array",
                 "items": {
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "date": {"type": "string", "description": "ISO transaction date"},
                         "posted_date": {"type": ["string", "null"]},
@@ -201,11 +213,15 @@ TOOL = {
                         "amount": {"type": "string", "description": "Positive decimal string"},
                         "direction": {"type": "string", "enum": ["debit", "credit"]},
                     },
-                    "required": ["date", "description", "amount", "direction"],
+                    "required": ["date", "posted_date", "description", "amount", "direction"],
                 },
             },
         },
-        "required": ["transactions"],
+        "required": [
+            "issuer", "account_last4", "statement_period_start", "statement_period_end",
+            "currency", "opening_balance", "closing_balance", "total_debits",
+            "total_credits", "transactions",
+        ],
     },
 }
 
@@ -213,7 +229,7 @@ TOOL = {
 def extract_page(client, page: Page, hint: str) -> dict:
     msg = client.messages.create(
         model=MODEL,
-        max_tokens=8000,
+        max_tokens=MAX_TOKENS,
         system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
         tools=[TOOL],
         tool_choice={"type": "tool", "name": "record_page"},
