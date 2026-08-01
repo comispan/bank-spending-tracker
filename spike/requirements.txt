@@ -1,4 +1,5 @@
 pdfplumber>=0.11
 pypdf>=5.0
 anthropic>=0.40
+openai>=1.60     # only needed for SPIKE_BASE_URL providers (Ollama, Groq, ...)
 reportlab>=4.0   # only needed for make_sample.py

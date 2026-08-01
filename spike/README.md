@@ -76,7 +76,35 @@ Per page: text → Claude → structured JSON → merged → **reconciled agains
 
 Card numbers are masked to last-4 before any text leaves the machine (`redact()` in `extract.py`), but understand that the rest of the page — merchants, amounts, dates — does go to the API. That's the tradeoff this step is testing. If it's not one you want to make, stop after Step 2; the answer is that you need per-bank template parsers instead, and the design changes accordingly.
 
-### Getting an API key
+### Choosing a provider
+
+The harness speaks two protocols: Anthropic (default) and **anything OpenAI-compatible** — which covers Ollama, Groq, DeepSeek, OpenRouter, Together, and Gemini's compat endpoint. Set `SPIKE_BASE_URL` and it switches.
+
+The reconciliation gate is identical across providers, so "is the cheap model good enough?" stops being a guess. Run the same statements through each and compare PASS counts.
+
+**Local — free, and nothing leaves your machine.** The strongest option for financial data:
+
+```bash
+# install Ollama, then:
+ollama pull qwen3:14b
+SPIKE_BASE_URL=http://localhost:11434/v1 SPIKE_MODEL=qwen3:14b python spike/extract.py
+```
+
+**Hosted, free tier:**
+
+```bash
+SPIKE_BASE_URL=https://api.groq.com/openai/v1 \
+SPIKE_API_KEY=gsk_... SPIKE_MODEL=llama-3.3-70b-versatile python spike/extract.py
+
+SPIKE_BASE_URL=https://openrouter.ai/api/v1 \
+SPIKE_API_KEY=sk-or-... SPIKE_MODEL=deepseek/deepseek-r1:free python spike/extract.py
+```
+
+⚠️ **Read the data terms before pointing a free tier at real statements.** Free tiers are frequently free because inputs are retained or used for training. That is a bad trade for a document listing everywhere you spend money. Local, or a paid tier with no-training terms, is the safer default here.
+
+**Hosted, cheapest paid** — DeepSeek and Gemini Flash-Lite land near $0.10–0.30 per million input tokens, roughly 20–50× below Opus 5. At this workload's volume that's the difference between $1 and 3 cents.
+
+### Getting an Anthropic API key
 
 The Anthropic API is **billed separately from a Claude Pro/Max subscription** — a subscription includes no API credits, and this is the most common surprise. Go to **console.anthropic.com** → Settings → API Keys → Create Key, then add a payment method and buy credits (minimum is small; see below).
 
