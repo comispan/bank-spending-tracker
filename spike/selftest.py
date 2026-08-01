@@ -157,6 +157,42 @@ def test_row_detection() -> None:
     check("ignores non-transaction lines", count_txn_shaped_lines([page(*non_rows)]) == 0)
 
 
+def test_page_rendering() -> None:
+    """Image mode is what lets a vision model read a scanned statement."""
+    print("\npage rendering (vision mode)")
+    import base64
+    import pypdfium2 as pdfium
+    from extract import read_pdf, render_page_png
+
+    tmp = Path(tempfile.mkdtemp())
+    blank = tmp / "blank.pdf"
+    doc = pdfium.PdfDocument.new()
+    doc.new_page(595, 842)
+    doc.save(str(blank))
+    doc.close()
+
+    b64 = render_page_png(blank, 0, 2.0)
+    raw = base64.b64decode(b64)
+    check("renders a page to PNG", raw[:8] == b"\x89PNG\r\n\x1a\n", repr(raw[:8]))
+
+    # A page with no text layer is a scan; auto mode must render it, text must not.
+    pages, _ = read_pdf(blank, None, "text")
+    check("scanned page detected", pages[0].looks_scanned)
+    check("text mode renders nothing", pages[0].image_b64 is None)
+
+    pages, _ = read_pdf(blank, None, "auto")
+    check("auto mode renders the scan", pages[0].image_b64 is not None)
+
+    # A page that *does* have text should not be rendered under auto.
+    sample = HERE / "statements" / "sample-statement.pdf"
+    if sample.exists():
+        pages, _ = read_pdf(sample, None, "auto")
+        check("auto mode leaves text pages alone", pages[0].image_b64 is None)
+        pages, _ = read_pdf(sample, None, "image")
+        check("image mode renders regardless", pages[0].image_b64 is not None)
+        check("image mode drops the text transcript", pages[0].text == "")
+
+
 def test_reconciliation() -> None:
     print("\nreconciliation gate")
 
@@ -215,6 +251,7 @@ if __name__ == "__main__":
     test_no_call_site_bypasses_the_helpers()
     test_encryption_paths()
     test_row_detection()
+    test_page_rendering()
     test_reconciliation()
     test_sanity_checks()
 
