@@ -11,10 +11,12 @@ Usage:
     python extract.py --file foo.pdf     # just one
 
 Provider is selected by environment:
+    SPIKE_PROVIDER   anthropic (default) | ollama | openai
     SPIKE_MODEL      model id (default claude-opus-5)
-    SPIKE_BASE_URL   set to use any OpenAI-compatible provider instead of
-                     Anthropic — Ollama, Groq, DeepSeek, OpenRouter, ...
-    SPIKE_API_KEY    key for that provider (Ollama needs none)
+    SPIKE_BASE_URL   endpoint; required for openai, defaults to
+                     http://localhost:11434 for ollama
+    SPIKE_API_KEY    key for the openai backend
+    SPIKE_NUM_CTX    ollama context window (default 16384)
 
 The reconciliation gate is the same either way, so provider choice is a
 measurable question: run the same statements through each, compare PASS counts.
@@ -277,37 +279,97 @@ def extract_page_openai_compatible(client, page: Page, hint: str) -> dict:
             {"role": "user", "content": user_prompt(page, hint)},
         ],
     )
-    raw = resp.choices[0].message.content or "{}"
+    return parse_json_loosely(resp.choices[0].message.content or "")
+
+
+def parse_json_loosely(raw: str) -> dict:
+    """Smaller and local models often wrap JSON in prose or a ``` fence."""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Smaller/local models sometimes wrap JSON in prose or a fence.
-        start, end = raw.find("{"), raw.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                return json.loads(raw[start:end + 1])
-            except json.JSONDecodeError:
-                pass
-        return {"transactions": []}
+        pass
+    start, end = raw.find("{"), raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(raw[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    return {"transactions": []}
+
+
+class OllamaClient:
+    """Ollama's native /api/chat.
+
+    Ollama does NOT accept OpenAI's `response_format: {type: "json_schema"}` on
+    its /v1 compatibility endpoint — it takes the schema in its own top-level
+    `format` field on /api/chat instead. Sending the OpenAI shape gets you
+    unconstrained prose that happens to look like JSON, or nothing.
+
+    Worth using the native path anyway: `format` constrains token *generation*
+    to the schema, so malformed JSON is mechanically impossible rather than
+    merely discouraged.
+    """
+
+    def __init__(self, base_url: str):
+        import httpx
+        self.url = base_url.rstrip("/").removesuffix("/v1") + "/api/chat"
+        # Cold-loading a 20GB model into RAM takes a while on the first call.
+        self.http = httpx.Client(timeout=httpx.Timeout(600.0, connect=10.0))
+
+    def chat(self, system: str, user: str, schema: dict) -> str:
+        r = self.http.post(self.url, json={
+            "model": MODEL,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "format": schema,
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                # Ollama defaults to a small context (often 4096). A statement
+                # page plus the system prompt and schema overruns that, and the
+                # overflow is silently dropped from the front — which looks
+                # exactly like the model missing transactions.
+                "num_ctx": int(os.environ.get("SPIKE_NUM_CTX", "16384")),
+            },
+        })
+        r.raise_for_status()
+        return r.json().get("message", {}).get("content", "")
+
+
+def extract_page_ollama(client: OllamaClient, page: Page, hint: str) -> dict:
+    raw = client.chat(SYSTEM, user_prompt(page, hint), TOOL["input_schema"])
+    return parse_json_loosely(raw)
 
 
 def build_client():
-    """Anthropic by default; any OpenAI-compatible provider when SPIKE_BASE_URL is set.
+    """Pick a backend from SPIKE_PROVIDER: anthropic (default) | ollama | openai.
 
-    The reconciliation gate is identical either way, so provider choice becomes
-    a measurable question — run the same statements through each and compare
-    the PASS counts, rather than guessing which model is good enough.
+    The reconciliation gate is identical across all three, so provider choice
+    becomes a measurable question — run the same statements through each and
+    compare PASS counts, rather than guessing which model is good enough.
     """
-    base_url = os.environ.get("SPIKE_BASE_URL")
-    if base_url:
+    provider = os.environ.get("SPIKE_PROVIDER", "anthropic").lower()
+
+    if provider == "ollama":
+        base = os.environ.get("SPIKE_BASE_URL", "http://localhost:11434")
+        return OllamaClient(base), extract_page_ollama
+
+    if provider == "openai":
+        base_url = os.environ.get("SPIKE_BASE_URL")
+        if not base_url:
+            raise SystemExit("SPIKE_PROVIDER=openai needs SPIKE_BASE_URL set.")
         import openai
-        # Ollama and some local servers ignore the key but require one present.
         key = os.environ.get("SPIKE_API_KEY") or "not-needed"
         return openai.OpenAI(base_url=base_url, api_key=key), extract_page_openai_compatible
 
+    if provider != "anthropic":
+        raise SystemExit(f"Unknown SPIKE_PROVIDER={provider!r} (anthropic | ollama | openai)")
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit(
-            "Set ANTHROPIC_API_KEY, or point SPIKE_BASE_URL at another provider.\n"
+            "Set ANTHROPIC_API_KEY, or pick another provider with SPIKE_PROVIDER.\n"
             "See spike/README.md for provider settings."
         )
     import anthropic

@@ -78,25 +78,61 @@ Card numbers are masked to last-4 before any text leaves the machine (`redact()`
 
 ### Choosing a provider
 
-The harness speaks two protocols: Anthropic (default) and **anything OpenAI-compatible** — which covers Ollama, Groq, DeepSeek, OpenRouter, Together, and Gemini's compat endpoint. Set `SPIKE_BASE_URL` and it switches.
+Set `SPIKE_PROVIDER` to one of `anthropic` (default), `ollama`, or `openai`. The
+`openai` backend covers Groq, DeepSeek, OpenRouter, Together, and Gemini's
+compatibility endpoint; `ollama` uses Ollama's own protocol (see below for why).
+
+| Variable | Meaning |
+|---|---|
+| `SPIKE_PROVIDER` | `anthropic` \| `ollama` \| `openai` |
+| `SPIKE_MODEL` | model id |
+| `SPIKE_BASE_URL` | endpoint (required for `openai`; defaults to `http://localhost:11434` for `ollama`) |
+| `SPIKE_API_KEY` | key for the `openai` backend |
+| `SPIKE_NUM_CTX` | Ollama context window, default 16384 |
 
 The reconciliation gate is identical across providers, so "is the cheap model good enough?" stops being a guess. Run the same statements through each and compare PASS counts.
 
+### Picking a local model (32GB RAM)
+
+Qwen 3.5's GGUFs currently don't load in Ollama (they ship separate `mmproj`
+vision files). **Qwen 3.6 is in the official Ollama library and is the one to
+use**; 3.5 needs llama.cpp directly.
+
+| Model | Size at Q4_K_M | Notes |
+|---|---|---|
+| `qwen3.6:35b-a3b` | ~20 GB | **Start here.** Mixture-of-experts, only ~3B parameters active per token, so it's far faster than its size suggests — the difference between usable and unusable when running on CPU. |
+| `qwen3.6:27b` | ~16 GB | Dense. Fits with more headroom but every parameter runs on every token, so it's slower despite being smaller. |
+| `qwen3.5:9b` | ~6 GB | Fallback if the above thrash. Expect weaker adherence on a strict schema. |
+
+Q5_K_M or higher is generally better for structured extraction, but 35B at Q5
+is ~25GB — tight on a 32GB machine with Windows and a browser running. Start at
+Q4_K_M and only move up if reconciliation is marginal.
+
 **Local — free, and nothing leaves your machine.** The strongest option for financial data:
 
-```bash
-# install Ollama, then:
-ollama pull qwen3:14b
-SPIKE_BASE_URL=http://localhost:11434/v1 SPIKE_MODEL=qwen3:14b python spike/extract.py
+```powershell
+ollama pull qwen3.6:35b-a3b
+$env:SPIKE_PROVIDER="ollama"; $env:SPIKE_MODEL="qwen3.6:35b-a3b"
+python spike/extract.py
 ```
+
+Uses Ollama's native `/api/chat` with its `format` parameter, which constrains
+token *generation* to the schema — malformed JSON becomes mechanically
+impossible rather than merely discouraged. Note Ollama does **not** accept
+OpenAI's `response_format: {type: "json_schema"}` on its `/v1` endpoint, so
+don't use `SPIKE_PROVIDER=openai` to reach it.
+
+`SPIKE_NUM_CTX` defaults to 16384. Ollama's own default is much smaller and
+silently drops overflow from the front of the prompt, which looks identical to
+the model missing transactions. Raise it for long statement pages.
 
 **Hosted, free tier:**
 
 ```bash
-SPIKE_BASE_URL=https://api.groq.com/openai/v1 \
+SPIKE_PROVIDER=openai SPIKE_BASE_URL=https://api.groq.com/openai/v1 \
 SPIKE_API_KEY=gsk_... SPIKE_MODEL=llama-3.3-70b-versatile python spike/extract.py
 
-SPIKE_BASE_URL=https://openrouter.ai/api/v1 \
+SPIKE_PROVIDER=openai SPIKE_BASE_URL=https://openrouter.ai/api/v1 \
 SPIKE_API_KEY=sk-or-... SPIKE_MODEL=deepseek/deepseek-r1:free python spike/extract.py
 ```
 
