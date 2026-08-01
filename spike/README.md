@@ -153,6 +153,42 @@ If a page times out, check whether it's swapping before raising anything —
 `ollama ps` shows resident size. If that's near your free RAM, the answer is a
 smaller model, not a longer timeout.
 
+#### Vision models: reading the page instead of its text
+
+`qwen3-vl` reads the rendered page as a picture rather than a text dump. Set
+`SPIKE_MODE`:
+
+| Mode | What it sends | Use when |
+|---|---|---|
+| `text` (default) | Extracted text | The PDF has a text layer. Cheapest and usually most accurate — the characters are exact, not inferred. |
+| `auto` | Text where there's a text layer, image where there isn't | **The one to run.** Scanned statements stop being a dead end. |
+| `image` | Always the page image | Comparing against `text` on the same statements, or when text extraction mangles a bank's layout. |
+
+```powershell
+$env:SPIKE_PROVIDER = "ollama"
+$env:SPIKE_MODEL    = "qwen3-vl:8b"
+$env:SPIKE_MODE     = "auto"
+python spike\extract.py
+```
+
+This closes a gap the design listed as unsolved: pages with no text layer were
+previously reported and skipped. Under `auto` they're rendered at ~1200×1700
+and read directly, so the OCR fallback in `DESIGN.md` §2.1 is now real rather
+than planned.
+
+Two things to know:
+
+- **Image mode is slower per page.** Image tokens are not free, and an 8B model
+  on CPU processes them slowly. Expect minutes, not seconds. The per-page timer
+  tells you where you stand.
+- **Redaction does not apply to pixels.** `redact()` masks card numbers in
+  extracted *text*; it can't touch a rendered image. That's fine locally, where
+  nothing leaves the machine — the harness refuses image mode on any non-Ollama
+  backend for exactly this reason.
+
+`SPIKE_IMAGE_SCALE` (default 2.0) trades resolution for speed. Drop to 1.5 if
+pages are slow; raise it if small print is being misread.
+
 #### Picking a local model (32GB RAM)
 
 Qwen 3.5's GGUFs currently don't load in Ollama (they ship separate `mmproj`
@@ -164,6 +200,7 @@ use**; 3.5 needs llama.cpp directly.
 | `qwen3.6:35b-a3b` | ~20 GB | **Start here.** Mixture-of-experts, only ~3B parameters active per token, so it's far faster than its size suggests — the difference between usable and unusable on CPU. |
 | `qwen3.6:27b` | ~16 GB | Dense. Fits with more headroom but every parameter runs on every token, so it's slower despite being smaller. |
 | `qwen3.5:9b` | ~6 GB | Fallback if the above thrash. Expect weaker adherence on a strict schema. |
+| `qwen3-vl:8b` | ~6 GB | **Vision.** The only one here that can read a scanned statement. Strong on document and table extraction for its size. Pair with `SPIKE_MODE=auto`. |
 
 Q5_K_M or higher is generally better for structured extraction, but 35B at Q5
 is ~25GB — tight on a 32GB machine with Windows and a browser running. Start at
@@ -238,6 +275,8 @@ The run prints which model and endpoint it used on the first line — check it m
 | `SPIKE_NUM_CTX` | Ollama context window, default 16384 |
 | `SPIKE_TIMEOUT` | Ollama per-page timeout in seconds, default 1800 |
 | `SPIKE_THINK` | `true` to allow thinking on Ollama (default off) |
+| `SPIKE_MODE` | `text` (default) \| `image` \| `auto` — send page images to a vision model |
+| `SPIKE_IMAGE_SCALE` | render scale for image mode, default 2.0 |
 
 The reconciliation gate is identical across providers, so "is the cheap model good enough?" stops being a guess. Run the same statements through each and compare PASS counts.
 

@@ -20,6 +20,9 @@ Provider is selected by environment:
     SPIKE_TIMEOUT    ollama per-page timeout in seconds (default 1800)
     SPIKE_THINK      set true to allow thinking on ollama (default off: for
                      schema-constrained extraction it only costs time)
+    SPIKE_MODE       text (default) | image | auto — send page images to a
+                     vision model. auto uses images only for scanned pages.
+    SPIKE_IMAGE_SCALE  render scale for image mode (default 2.0)
 
 The reconciliation gate is the same either way, so provider choice is a
 measurable question: run the same statements through each, compare PASS counts.
@@ -129,14 +132,40 @@ class Page:
     number: int
     text: str
     char_count: int
+    image_b64: str | None = None   # populated only when the mode needs it
 
     @property
     def looks_scanned(self) -> bool:
         return self.char_count < SCAN_CHAR_THRESHOLD
 
 
-def read_pdf(path: Path, password: str | None) -> tuple[list[Page], str | None]:
-    """Return (pages, error). Decrypts first if needed."""
+def render_page_png(path: Path, index: int, scale: float) -> str:
+    """Render one page to a base64 PNG for a vision model.
+
+    scale 2.0 puts a statement page around 1200x1700, which is enough for
+    small print without ballooning the image-token count.
+    """
+    import io, base64
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        img = pdf[index].render(scale=scale).to_pil().convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        return base64.b64encode(buf.getvalue()).decode()
+    finally:
+        pdf.close()
+
+
+def read_pdf(path: Path, password: str | None, mode: str = "text") -> tuple[list[Page], str | None]:
+    """Return (pages, error). Decrypts first if needed.
+
+    mode controls whether page images are rendered for a vision model:
+      text  — never (default)
+      image — always; the model reads the page as a picture
+      auto  — only for pages with no text layer, i.e. scans
+    """
     source = path
 
     reader = pypdf.PdfReader(str(path))
@@ -168,6 +197,17 @@ def read_pdf(path: Path, password: str | None) -> tuple[list[Page], str | None]:
             # Plain extract_text() interleaves columns and destroys the table.
             raw = page.extract_text(layout=True) or ""
             pages.append(Page(number=i, text=redact(raw), char_count=len(raw.strip())))
+
+    if mode in ("image", "auto"):
+        scale = float(os.environ.get("SPIKE_IMAGE_SCALE", "2.0"))
+        for i, p in enumerate(pages):
+            if mode == "image" or p.looks_scanned:
+                p.image_b64 = render_page_png(source, i, scale)
+                # Send the picture alone rather than the picture plus a text
+                # transcript of it — two versions of the same page invites the
+                # model to reconcile them instead of reading one.
+                if mode == "image":
+                    p.text = ""
 
     if source != path:
         source.unlink(missing_ok=True)
@@ -242,6 +282,11 @@ TOOL = {
 
 
 def user_prompt(page: Page, hint: str) -> str:
+    if page.image_b64 and not page.text:
+        return (
+            f"Statement page {page.number}.{hint}\n\n"
+            f"Read the attached page image and extract its transaction table."
+        )
     return f"Statement page {page.number}.{hint}\n\n<page>\n{page.text}\n</page>"
 
 
@@ -329,10 +374,10 @@ class OllamaClient:
         self.think = os.environ.get("SPIKE_THINK", "").lower() in ("1", "true", "yes")
         self._send_think = True   # cleared if this server/model rejects the field
 
-    def chat(self, system: str, user: str, schema: dict) -> str:
+    def chat(self, system: str, user: str, schema: dict, image_b64: str | None = None) -> str:
         import httpx
         try:
-            return self._post(system, user, schema)
+            return self._post(system, user, schema, image_b64)
         except httpx.ConnectError:
             raise SystemExit(
                 f"Can't reach Ollama at {self.url}.\n"
@@ -358,13 +403,16 @@ class OllamaClient:
                 hint = f"\nIs the model pulled?  ollama pull {MODEL}"
             raise SystemExit(f"Ollama returned {e.response.status_code}.{hint}") from None
 
-    def _post(self, system: str, user: str, schema: dict) -> str:
+    def _post(self, system: str, user: str, schema: dict, image_b64: str | None = None) -> str:
         import httpx
+        message = {"role": "user", "content": user}
+        if image_b64:
+            message["images"] = [image_b64]
         payload = {
             "model": MODEL,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                message,
             ],
             "format": schema,
             "stream": False,
@@ -394,7 +442,7 @@ class OllamaClient:
 
 
 def extract_page_ollama(client: OllamaClient, page: Page, hint: str) -> dict:
-    raw = client.chat(SYSTEM, user_prompt(page, hint), TOOL["input_schema"])
+    raw = client.chat(SYSTEM, user_prompt(page, hint), TOOL["input_schema"], page.image_b64)
     return parse_json_loosely(raw)
 
 
@@ -539,10 +587,10 @@ def merge(pages: list[dict]) -> dict:
     return out
 
 
-def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn) -> Result:
+def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn, mode: str = "text") -> Result:
     r = Result(name=path.name)
 
-    pages, err = read_pdf(path, passwords.get(path.name))
+    pages, err = read_pdf(path, passwords.get(path.name), mode if not dry_run else "text")
     if err:
         r.verdict = "ERROR"
         r.detail = err
@@ -551,7 +599,12 @@ def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn) -> R
     r.pages = len(pages)
     r.scanned_pages = sum(1 for p in pages if p.looks_scanned)
     if r.scanned_pages:
-        r.warnings.append(f"{r.scanned_pages}/{r.pages} page(s) have no text layer — needs OCR")
+        if any(p.looks_scanned and p.image_b64 for p in pages):
+            r.warnings.append(f"{r.scanned_pages}/{r.pages} page(s) have no text layer — read as images")
+        else:
+            r.warnings.append(
+                f"{r.scanned_pages}/{r.pages} page(s) have no text layer — "
+                f"skipped (set SPIKE_MODE=auto with a vision model to read them)")
 
     if dry_run:
         dump = OUT / f"{path.stem}.txt"
@@ -568,7 +621,8 @@ def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn) -> R
     hint = ""
     extracted = []
     for p in pages:
-        if p.looks_scanned:
+        # A scanned page has nothing to send unless we rendered it.
+        if p.looks_scanned and not p.image_b64:
             continue
         # A local model can sit on one page for minutes. Without this, a slow
         # run and a hung one look identical and you can't tell which you have.
@@ -639,9 +693,19 @@ def main() -> int:
                 f"Set SPIKE_MODEL to a model that provider serves."
             )
 
-        print(f"Extracting with {MODEL} via {provider} @ {where}")
+        mode = os.environ.get("SPIKE_MODE", "text").lower()
+        if mode not in ("text", "image", "auto"):
+            raise SystemExit(f"Unknown SPIKE_MODE={mode!r} (text | image | auto)")
+        if mode != "text" and provider != "ollama":
+            raise SystemExit(
+                f"SPIKE_MODE={mode} sends page images, which only the ollama "
+                f"backend supports here.\n"
+                f"Note images cannot be redacted the way text is — the card "
+                f"number stays visible in the pixels, so keep image mode local."
+            )
+        print(f"Extracting with {MODEL} via {provider} @ {where}  [mode={mode}]")
 
-    results = [process(f, passwords, args.dry_run, client, extract_fn) for f in files]
+    results = [process(f, passwords, args.dry_run, client, extract_fn, mode) for f in files]
 
     width = max(len(r.name) for r in results)
     print(f"\n{'statement'.ljust(width)}  {'pages':>5} {'rows':>5}  verdict     detail")
