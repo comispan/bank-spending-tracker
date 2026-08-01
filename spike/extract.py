@@ -9,6 +9,15 @@ Usage:
     python extract.py --dry-run          # text extraction only, no network
     python extract.py                    # full pipeline (needs ANTHROPIC_API_KEY)
     python extract.py --file foo.pdf     # just one
+
+Provider is selected by environment:
+    SPIKE_MODEL      model id (default claude-opus-5)
+    SPIKE_BASE_URL   set to use any OpenAI-compatible provider instead of
+                     Anthropic — Ollama, Groq, DeepSeek, OpenRouter, ...
+    SPIKE_API_KEY    key for that provider (Ollama needs none)
+
+The reconciliation gate is the same either way, so provider choice is a
+measurable question: run the same statements through each, compare PASS counts.
 """
 
 from __future__ import annotations
@@ -226,22 +235,83 @@ TOOL = {
 }
 
 
-def extract_page(client, page: Page, hint: str) -> dict:
+def user_prompt(page: Page, hint: str) -> str:
+    return f"Statement page {page.number}.{hint}\n\n<page>\n{page.text}\n</page>"
+
+
+def extract_page_anthropic(client, page: Page, hint: str) -> dict:
     msg = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
         tools=[TOOL],
         tool_choice={"type": "tool", "name": "record_page"},
-        messages=[{
-            "role": "user",
-            "content": f"Statement page {page.number}.{hint}\n\n<page>\n{page.text}\n</page>",
-        }],
+        messages=[{"role": "user", "content": user_prompt(page, hint)}],
     )
     for block in msg.content:
         if block.type == "tool_use":
             return block.input
     return {"transactions": []}
+
+
+def extract_page_openai_compatible(client, page: Page, hint: str) -> dict:
+    """Any provider speaking the OpenAI chat-completions API.
+
+    Covers Ollama (local), Groq, DeepSeek, OpenRouter, Together, and Gemini's
+    compatibility endpoint. Uses JSON-schema response format rather than tool
+    use — more widely supported across these providers, same guarantee.
+    """
+    resp = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "record_page",
+                "strict": True,
+                "schema": TOOL["input_schema"],
+            },
+        },
+        messages=[
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user_prompt(page, hint)},
+        ],
+    )
+    raw = resp.choices[0].message.content or "{}"
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Smaller/local models sometimes wrap JSON in prose or a fence.
+        start, end = raw.find("{"), raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(raw[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+        return {"transactions": []}
+
+
+def build_client():
+    """Anthropic by default; any OpenAI-compatible provider when SPIKE_BASE_URL is set.
+
+    The reconciliation gate is identical either way, so provider choice becomes
+    a measurable question — run the same statements through each and compare
+    the PASS counts, rather than guessing which model is good enough.
+    """
+    base_url = os.environ.get("SPIKE_BASE_URL")
+    if base_url:
+        import openai
+        # Ollama and some local servers ignore the key but require one present.
+        key = os.environ.get("SPIKE_API_KEY") or "not-needed"
+        return openai.OpenAI(base_url=base_url, api_key=key), extract_page_openai_compatible
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise SystemExit(
+            "Set ANTHROPIC_API_KEY, or point SPIKE_BASE_URL at another provider.\n"
+            "See spike/README.md for provider settings."
+        )
+    import anthropic
+    return anthropic.Anthropic(), extract_page_anthropic
 
 
 # -------------------------------------------------------------- reconcile
@@ -352,7 +422,7 @@ def merge(pages: list[dict]) -> dict:
     return out
 
 
-def process(path: Path, passwords: dict, dry_run: bool, client) -> Result:
+def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn) -> Result:
     r = Result(name=path.name)
 
     pages, err = read_pdf(path, passwords.get(path.name))
@@ -383,7 +453,7 @@ def process(path: Path, passwords: dict, dry_run: bool, client) -> Result:
     for p in pages:
         if p.looks_scanned:
             continue
-        page_data = extract_page(client, p, hint)
+        page_data = extract_fn(client, p, hint)
         extracted.append(page_data)
         # Carry the period forward so later pages can resolve bare day/month dates.
         if not hint:
@@ -428,15 +498,13 @@ def main() -> int:
         print(f"No PDFs in {STATEMENTS}/ — drop statements there and re-run.")
         return 1
 
-    client = None
+    client, extract_fn = (None, None)
     if not args.dry_run:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("ANTHROPIC_API_KEY is not set. Use --dry-run to test extraction offline.")
-            return 1
-        import anthropic
-        client = anthropic.Anthropic()
+        client, extract_fn = build_client()
+        where = os.environ.get("SPIKE_BASE_URL", "api.anthropic.com")
+        print(f"Extracting with {MODEL} via {where}")
 
-    results = [process(f, passwords, args.dry_run, client) for f in files]
+    results = [process(f, passwords, args.dry_run, client, extract_fn) for f in files]
 
     width = max(len(r.name) for r in results)
     print(f"\n{'statement'.ljust(width)}  {'pages':>5} {'rows':>5}  verdict     detail")
