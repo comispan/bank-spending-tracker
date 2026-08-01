@@ -17,6 +17,9 @@ Provider is selected by environment:
                      http://localhost:11434 for ollama
     SPIKE_API_KEY    key for the openai backend
     SPIKE_NUM_CTX    ollama context window (default 16384)
+    SPIKE_TIMEOUT    ollama per-page timeout in seconds (default 1800)
+    SPIKE_THINK      set true to allow thinking on ollama (default off: for
+                     schema-constrained extraction it only costs time)
 
 The reconciliation gate is the same either way, so provider choice is a
 measurable question: run the same statements through each, compare PASS counts.
@@ -29,6 +32,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -313,8 +317,17 @@ class OllamaClient:
     def __init__(self, base_url: str):
         import httpx
         self.url = base_url.rstrip("/").removesuffix("/v1") + "/api/chat"
-        # Cold-loading a 20GB model into RAM takes a while on the first call.
-        self.http = httpx.Client(timeout=httpx.Timeout(600.0, connect=10.0))
+        # Cold-loading a 20GB model into RAM takes a while on the first call,
+        # and CPU-only generation is slow. Generous, but bounded.
+        timeout = float(os.environ.get("SPIKE_TIMEOUT", "1800"))
+        self.http = httpx.Client(timeout=httpx.Timeout(timeout, connect=10.0))
+        self.timeout = timeout
+        # Ollama 0.12+ auto-enables thinking on thinking-capable models. For
+        # schema-constrained extraction that's pure cost: the model writes a
+        # long reasoning trace before emitting JSON it was going to be forced
+        # into anyway. Off unless explicitly asked for.
+        self.think = os.environ.get("SPIKE_THINK", "").lower() in ("1", "true", "yes")
+        self._send_think = True   # cleared if this server/model rejects the field
 
     def chat(self, system: str, user: str, schema: dict) -> str:
         import httpx
@@ -325,6 +338,20 @@ class OllamaClient:
                 f"Can't reach Ollama at {self.url}.\n"
                 f"Start it (`ollama serve`, or launch the Ollama app) and retry."
             ) from None
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
+            raise SystemExit(
+                f"Ollama did not respond within {self.timeout:.0f}s on one page.\n"
+                f"\n"
+                f"{MODEL} is likely too slow on this machine, or is swapping to disk.\n"
+                f"In rough order of what to try:\n"
+                f"  1. Prove the pipeline with a small model first:\n"
+                f"       ollama pull qwen3.5:9b\n"
+                f"       $env:SPIKE_MODEL = \"qwen3.5:9b\"\n"
+                f"  2. Check it isn't swapping — `ollama ps` shows resident size.\n"
+                f"     If that approaches your free RAM, use a smaller model.\n"
+                f"  3. Raise the ceiling if it's merely slow, not stuck:\n"
+                f"       $env:SPIKE_TIMEOUT = \"3600\"\n"
+            ) from None
         except httpx.HTTPStatusError as e:
             hint = ""
             if e.response.status_code == 404:
@@ -332,7 +359,8 @@ class OllamaClient:
             raise SystemExit(f"Ollama returned {e.response.status_code}.{hint}") from None
 
     def _post(self, system: str, user: str, schema: dict) -> str:
-        r = self.http.post(self.url, json={
+        import httpx
+        payload = {
             "model": MODEL,
             "messages": [
                 {"role": "system", "content": system},
@@ -340,6 +368,7 @@ class OllamaClient:
             ],
             "format": schema,
             "stream": False,
+            "keep_alive": "10m",   # don't re-load the model between pages
             "options": {
                 "temperature": 0,
                 # Ollama defaults to a small context (often 4096). A statement
@@ -348,7 +377,18 @@ class OllamaClient:
                 # exactly like the model missing transactions.
                 "num_ctx": int(os.environ.get("SPIKE_NUM_CTX", "16384")),
             },
-        })
+        }
+        if self._send_think:
+            payload["think"] = self.think
+
+        r = self.http.post(self.url, json=payload)
+        # Older Ollama builds don't know the `think` field. Drop it and retry
+        # rather than failing the run over an optimisation.
+        if r.status_code == 400 and self._send_think:
+            self._send_think = False
+            payload.pop("think")
+            r = self.http.post(self.url, json=payload)
+
         r.raise_for_status()
         return r.json().get("message", {}).get("content", "")
 
@@ -530,7 +570,13 @@ def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn) -> R
     for p in pages:
         if p.looks_scanned:
             continue
+        # A local model can sit on one page for minutes. Without this, a slow
+        # run and a hung one look identical and you can't tell which you have.
+        print(f"  {path.name} page {p.number}/{len(pages)} ...", end="", flush=True)
+        started = time.monotonic()
         page_data = extract_fn(client, p, hint)
+        elapsed = time.monotonic() - started
+        print(f" {len(page_data.get('transactions', [])):>3} txns  {elapsed:6.1f}s")
         extracted.append(page_data)
         # Carry the period forward so later pages can resolve bare day/month dates.
         if not hint:

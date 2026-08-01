@@ -104,14 +104,54 @@ impossible rather than merely discouraged.
 on its `/v1` endpoint, so don't try to reach it with `SPIKE_PROVIDER=openai`.
 You'd get unconstrained output and conclude local models can't do this.
 
-`SPIKE_NUM_CTX` defaults to 16384. Ollama's own default is much smaller and
-silently drops overflow from the *front* of the prompt — which looks identical
-to the model missing transactions rather than a config problem. Raise it for
-long statement pages:
+**Prove the pipeline on a small model first.** A 20GB model on a 32GB machine
+is the worst thing to debug against — you can't tell a wrong setting from slow
+inference. Get a green run on something fast, then scale up:
 
 ```powershell
+ollama pull qwen3.5:9b
+$env:SPIKE_MODEL = "qwen3.5:9b"
+python spike\extract.py --file spike\statements\sample-statement.pdf
+```
+
+That's ~6GB and one synthetic page. If it reconciles, the plumbing is right and
+any later failure is about model capability.
+
+#### Thinking is off by default, deliberately
+
+Ollama 0.12+ auto-enables thinking on thinking-capable models, and Qwen 3.x is
+one. For schema-constrained extraction that is pure cost: the model writes a
+long reasoning trace before emitting JSON it was going to be forced into
+anyway. Minutes per page instead of seconds.
+
+The harness sends `think: false`. To measure the difference yourself:
+
+```powershell
+$env:SPIKE_THINK = "true"
+```
+
+(Older Ollama builds don't know the field; the harness detects the rejection
+and retries without it rather than failing the run.)
+
+#### Timeouts and context
+
+| Variable | Default | Raise it when |
+|---|---|---|
+| `SPIKE_TIMEOUT` | 1800 (30 min per page) | The model is genuinely slow rather than stuck |
+| `SPIKE_NUM_CTX` | 16384 | Statement pages are long |
+
+`SPIKE_NUM_CTX` matters more than it looks. Ollama's own default is much
+smaller, and it drops overflow from the *front* of the prompt silently — which
+looks identical to the model missing transactions rather than a config problem.
+
+```powershell
+$env:SPIKE_TIMEOUT = "3600"
 $env:SPIKE_NUM_CTX = "32768"
 ```
+
+If a page times out, check whether it's swapping before raising anything —
+`ollama ps` shows resident size. If that's near your free RAM, the answer is a
+smaller model, not a longer timeout.
 
 #### Picking a local model (32GB RAM)
 
@@ -196,6 +236,8 @@ The run prints which model and endpoint it used on the first line — check it m
 | `SPIKE_BASE_URL` | endpoint (required for `openai`; defaults to `http://localhost:11434` for `ollama`) |
 | `SPIKE_API_KEY` | key for the `openai` backend |
 | `SPIKE_NUM_CTX` | Ollama context window, default 16384 |
+| `SPIKE_TIMEOUT` | Ollama per-page timeout in seconds, default 1800 |
+| `SPIKE_THINK` | `true` to allow thinking on Ollama (default off) |
 
 The reconciliation gate is identical across providers, so "is the cheap model good enough?" stops being a guess. Run the same statements through each and compare PASS counts.
 
