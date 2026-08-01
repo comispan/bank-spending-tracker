@@ -193,6 +193,46 @@ def test_page_rendering() -> None:
         check("image mode drops the text transcript", pages[0].text == "")
 
 
+def test_cli_runs() -> None:
+    """Actually invoke the CLI.
+
+    Everything else here imports functions directly, so a NameError in main()
+    sails straight through — which is how a broken --dry-run once shipped.
+    """
+    print("\ncli smoke test")
+    import os
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SPIKE_")}
+    env.pop("ANTHROPIC_API_KEY", None)
+
+    r = subprocess.run(
+        [sys.executable, str(HERE / "extract.py"), "--dry-run"],
+        capture_output=True, text=True, env=env,
+    )
+    check("--dry-run exits 0", r.returncode == 0, r.stderr.strip()[-300:])
+    check("--dry-run raises no traceback", "Traceback" not in r.stderr,
+          r.stderr.strip()[-300:])
+
+    # No credentials and no provider: should be a clean message, not a crash.
+    r2 = subprocess.run(
+        [sys.executable, str(HERE / "extract.py")],
+        capture_output=True, text=True, env=env,
+    )
+    check("missing credentials fail cleanly", "Traceback" not in r2.stderr,
+          r2.stderr.strip()[-300:])
+
+    # Bad mode should be rejected by name, not by stack trace.
+    r3 = subprocess.run(
+        [sys.executable, str(HERE / "extract.py")],
+        capture_output=True, text=True,
+        env={**env, "SPIKE_PROVIDER": "ollama", "SPIKE_MODEL": "x", "SPIKE_MODE": "bogus"},
+    )
+    check("invalid SPIKE_MODE rejected cleanly",
+          "Traceback" not in r3.stderr and "SPIKE_MODE" in r3.stderr,
+          r3.stderr.strip()[-300:])
+
+
 def test_reconciliation() -> None:
     print("\nreconciliation gate")
 
@@ -252,6 +292,7 @@ if __name__ == "__main__":
     test_encryption_paths()
     test_row_detection()
     test_page_rendering()
+    test_cli_runs()
     test_reconciliation()
     test_sanity_checks()
 
