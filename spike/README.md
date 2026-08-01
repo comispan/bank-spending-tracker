@@ -4,22 +4,31 @@
 
 Nothing here is production code. Answer the question, throw it away, then build Phase 1 knowing what you're up against.
 
+All commands below are Windows PowerShell.
+
 ## Run it on your machine, not in a cloud session
 
 Statements are among the most sensitive documents you own. Keep them local.
 `spike/statements/`, `spike/out/`, and `passwords.json` are all gitignored — check that before you copy anything in.
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r spike/requirements.txt
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r spike\requirements.txt
+```
+
+If activation fails with *"running scripts is disabled on this system"*, PowerShell's execution policy is blocking it. Allow it for this window only — no permanent change to your machine:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
 ## Step 1 — smoke-test (no real data, no network)
 
-```bash
-python spike/selftest.py          # checks encoding + the reconciliation gate
-python spike/make_sample.py       # writes a synthetic statement
-python spike/extract.py --dry-run
+```powershell
+python spike\selftest.py          # checks encoding + the reconciliation gate
+python spike\make_sample.py       # writes a synthetic statement
+python spike\extract.py --dry-run
 ```
 
 Confirms the plumbing works before you point it at anything real. `selftest.py`
@@ -37,17 +46,21 @@ the source for that mistake, so a future edit that reintroduces it fails loudly.
 
 Files we *don't* write — currently just `passwords.json` — are decoded
 tolerantly (UTF-8, UTF-8-with-BOM, then cp1252), so it doesn't matter which
-editor you used to create it.
+editor you used to create it. Notepad's BOM is handled.
 
 ## Step 2 — text extraction on your statements (still no network)
 
-Drop 5–10 real PDFs into `spike/statements/`, then:
+Drop 5–10 real PDFs into `spike\statements\`, then:
 
-```bash
-python spike/extract.py --dry-run
+```powershell
+python spike\extract.py --dry-run
 ```
 
-This **sends nothing anywhere.** It writes each statement's extracted text to `spike/out/<name>.txt`. Open a few and check whether the transaction table survived — columns aligned, amounts on the right row, dates intact.
+This **sends nothing anywhere.** It writes each statement's extracted text to `spike\out\<name>.txt`. Open a few and check whether the transaction table survived — columns aligned, amounts on the right row, dates intact.
+
+```powershell
+notepad spike\out\dbs.txt
+```
 
 This step alone is worth doing carefully. If the text comes out scrambled or empty, no amount of LLM cleverness downstream will fix it, and you've learned that for free.
 
@@ -59,7 +72,7 @@ Many issuers encrypt statements only to set permission flags (no printing, no
 copying) and leave the user password *empty* — DBS does this. Those open with no
 password at all, and the tool tries that automatically before asking for one.
 
-If a statement is genuinely locked, create `spike/passwords.json`:
+If a statement is genuinely locked, create `spike\passwords.json`:
 
 ```json
 { "uob-jun-2026.pdf": "S1234567A", "ocbc-jun-2026.pdf": "0512" }
@@ -67,32 +80,40 @@ If a statement is genuinely locked, create `spike/passwords.json`:
 
 ## Step 3 — full pipeline
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-python spike/extract.py
+Per page: text → model → structured JSON → merged → **reconciled against the statement's own printed totals.**
+
+Card numbers are masked to last-4 before any text leaves the machine (`redact()` in `extract.py`). If you use a hosted provider, the rest of the page — merchants, amounts, dates — does go to that API. That's the tradeoff this step is testing. Running locally (below) avoids it entirely.
+
+### Option A — local, free, nothing leaves your machine
+
+The best fit for financial data, and the one to try first on a 32GB Windows box:
+
+```powershell
+ollama pull qwen3.6:35b-a3b
+
+$env:SPIKE_PROVIDER = "ollama"
+$env:SPIKE_MODEL    = "qwen3.6:35b-a3b"
+python spike\extract.py
 ```
 
-Per page: text → Claude → structured JSON → merged → **reconciled against the statement's own printed totals.**
+Uses Ollama's native `/api/chat` with its `format` parameter, which constrains
+token *generation* to the schema — malformed JSON becomes mechanically
+impossible rather than merely discouraged.
 
-Card numbers are masked to last-4 before any text leaves the machine (`redact()` in `extract.py`), but understand that the rest of the page — merchants, amounts, dates — does go to the API. That's the tradeoff this step is testing. If it's not one you want to make, stop after Step 2; the answer is that you need per-bank template parsers instead, and the design changes accordingly.
+⚠️ Ollama does **not** accept OpenAI's `response_format: {type: "json_schema"}`
+on its `/v1` endpoint, so don't try to reach it with `SPIKE_PROVIDER=openai`.
+You'd get unconstrained output and conclude local models can't do this.
 
-### Choosing a provider
+`SPIKE_NUM_CTX` defaults to 16384. Ollama's own default is much smaller and
+silently drops overflow from the *front* of the prompt — which looks identical
+to the model missing transactions rather than a config problem. Raise it for
+long statement pages:
 
-Set `SPIKE_PROVIDER` to one of `anthropic` (default), `ollama`, or `openai`. The
-`openai` backend covers Groq, DeepSeek, OpenRouter, Together, and Gemini's
-compatibility endpoint; `ollama` uses Ollama's own protocol (see below for why).
+```powershell
+$env:SPIKE_NUM_CTX = "32768"
+```
 
-| Variable | Meaning |
-|---|---|
-| `SPIKE_PROVIDER` | `anthropic` \| `ollama` \| `openai` |
-| `SPIKE_MODEL` | model id |
-| `SPIKE_BASE_URL` | endpoint (required for `openai`; defaults to `http://localhost:11434` for `ollama`) |
-| `SPIKE_API_KEY` | key for the `openai` backend |
-| `SPIKE_NUM_CTX` | Ollama context window, default 16384 |
-
-The reconciliation gate is identical across providers, so "is the cheap model good enough?" stops being a guess. Run the same statements through each and compare PASS counts.
-
-### Picking a local model (32GB RAM)
+#### Picking a local model (32GB RAM)
 
 Qwen 3.5's GGUFs currently don't load in Ollama (they ship separate `mmproj`
 vision files). **Qwen 3.6 is in the official Ollama library and is the one to
@@ -100,7 +121,7 @@ use**; 3.5 needs llama.cpp directly.
 
 | Model | Size at Q4_K_M | Notes |
 |---|---|---|
-| `qwen3.6:35b-a3b` | ~20 GB | **Start here.** Mixture-of-experts, only ~3B parameters active per token, so it's far faster than its size suggests — the difference between usable and unusable when running on CPU. |
+| `qwen3.6:35b-a3b` | ~20 GB | **Start here.** Mixture-of-experts, only ~3B parameters active per token, so it's far faster than its size suggests — the difference between usable and unusable on CPU. |
 | `qwen3.6:27b` | ~16 GB | Dense. Fits with more headroom but every parameter runs on every token, so it's slower despite being smaller. |
 | `qwen3.5:9b` | ~6 GB | Fallback if the above thrash. Expect weaker adherence on a strict schema. |
 
@@ -108,47 +129,79 @@ Q5_K_M or higher is generally better for structured extraction, but 35B at Q5
 is ~25GB — tight on a 32GB machine with Windows and a browser running. Start at
 Q4_K_M and only move up if reconciliation is marginal.
 
-**Local — free, and nothing leaves your machine.** The strongest option for financial data:
+Check what's actually loaded and how much RAM it's using:
 
 ```powershell
-ollama pull qwen3.6:35b-a3b
-$env:SPIKE_PROVIDER="ollama"; $env:SPIKE_MODEL="qwen3.6:35b-a3b"
-python spike/extract.py
+ollama list
+ollama ps
 ```
 
-Uses Ollama's native `/api/chat` with its `format` parameter, which constrains
-token *generation* to the schema — malformed JSON becomes mechanically
-impossible rather than merely discouraged. Note Ollama does **not** accept
-OpenAI's `response_format: {type: "json_schema"}` on its `/v1` endpoint, so
-don't use `SPIKE_PROVIDER=openai` to reach it.
+### Option B — Anthropic (the accuracy baseline)
 
-`SPIKE_NUM_CTX` defaults to 16384. Ollama's own default is much smaller and
-silently drops overflow from the front of the prompt, which looks identical to
-the model missing transactions. Raise it for long statement pages.
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+python spike\extract.py
+```
 
-**Hosted, free tier:**
+`$env:` lasts only for the current PowerShell window. To persist it for your user account:
 
-```bash
-SPIKE_PROVIDER=openai SPIKE_BASE_URL=https://api.groq.com/openai/v1 \
-SPIKE_API_KEY=gsk_... SPIKE_MODEL=llama-3.3-70b-versatile python spike/extract.py
+```powershell
+[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-...", "User")
+```
 
-SPIKE_PROVIDER=openai SPIKE_BASE_URL=https://openrouter.ai/api/v1 \
-SPIKE_API_KEY=sk-or-... SPIKE_MODEL=deepseek/deepseek-r1:free python spike/extract.py
+Reopen PowerShell afterwards for it to take effect. Don't put the key in a file inside the repo.
+
+**Getting a key:** console.anthropic.com → Settings → API Keys → Create Key. The API is **billed separately from a Claude Pro/Max subscription** — a subscription includes no API credits, which is the most common surprise. Add a payment method and buy credits before the first run.
+
+### Option C — hosted, free or cheap
+
+```powershell
+$env:SPIKE_PROVIDER = "openai"
+$env:SPIKE_BASE_URL = "https://api.groq.com/openai/v1"
+$env:SPIKE_API_KEY  = "gsk_..."
+$env:SPIKE_MODEL    = "llama-3.3-70b-versatile"
+python spike\extract.py
+```
+
+```powershell
+$env:SPIKE_PROVIDER = "openai"
+$env:SPIKE_BASE_URL = "https://openrouter.ai/api/v1"
+$env:SPIKE_API_KEY  = "sk-or-..."
+$env:SPIKE_MODEL    = "deepseek/deepseek-r1:free"
+python spike\extract.py
 ```
 
 ⚠️ **Read the data terms before pointing a free tier at real statements.** Free tiers are frequently free because inputs are retained or used for training. That is a bad trade for a document listing everywhere you spend money. Local, or a paid tier with no-training terms, is the safer default here.
 
-**Hosted, cheapest paid** — DeepSeek and Gemini Flash-Lite land near $0.10–0.30 per million input tokens, roughly 20–50× below Opus 5. At this workload's volume that's the difference between $1 and 3 cents.
+Cheapest paid: DeepSeek and Gemini Flash-Lite land near $0.10–0.30 per million input tokens, roughly 20–50× below Opus 5.
 
-### Getting an Anthropic API key
+### Switching back, and clearing variables
 
-The Anthropic API is **billed separately from a Claude Pro/Max subscription** — a subscription includes no API credits, and this is the most common surprise. Go to **console.anthropic.com** → Settings → API Keys → Create Key, then add a payment method and buy credits (minimum is small; see below).
+Environment variables persist for the life of the window, so a leftover
+`SPIKE_PROVIDER` will silently send the next run somewhere you didn't intend.
+Clear them when switching:
 
-The key is shown once. Store it outside the repo — `export ANTHROPIC_API_KEY=...` in your shell profile, not in a file here.
+```powershell
+Remove-Item Env:SPIKE_PROVIDER, Env:SPIKE_MODEL, Env:SPIKE_BASE_URL, Env:SPIKE_API_KEY -ErrorAction SilentlyContinue
+```
 
-### What it costs
+The run prints which model and endpoint it used on the first line — check it matches what you meant.
 
-Runs on `claude-opus-5` by default. For 5 statements at ~4 pages each, expect **well under $2** for the whole spike. Concretely, at roughly 3K input / 1.5K output tokens per page and Opus 5's $5/$25 per million:
+### Provider settings reference
+
+| Variable | Meaning |
+|---|---|
+| `SPIKE_PROVIDER` | `anthropic` (default) \| `ollama` \| `openai` |
+| `SPIKE_MODEL` | model id |
+| `SPIKE_BASE_URL` | endpoint (required for `openai`; defaults to `http://localhost:11434` for `ollama`) |
+| `SPIKE_API_KEY` | key for the `openai` backend |
+| `SPIKE_NUM_CTX` | Ollama context window, default 16384 |
+
+The reconciliation gate is identical across providers, so "is the cheap model good enough?" stops being a guess. Run the same statements through each and compare PASS counts.
+
+### What Anthropic costs, if you use it
+
+Runs on `claude-opus-5` by default. For 5 statements at ~4 pages each, expect **well under $2** for the whole spike — roughly 3K input / 1.5K output tokens per page at Opus 5's $5/$25 per million:
 
 | Model | Per page | 20 pages |
 |---|---|---|
@@ -157,11 +210,10 @@ Runs on `claude-opus-5` by default. For 5 statements at ~4 pages each, expect **
 
 Run the default first. The spike is asking *whether extraction is possible at all*, so a failure should mean the approach is hard — not that you economized on the model. Once it passes:
 
-```bash
-SPIKE_MODEL=claude-sonnet-5 python spike/extract.py
+```powershell
+$env:SPIKE_MODEL = "claude-sonnet-5"
+python spike\extract.py
 ```
-
-If Sonnet reconciles just as cleanly, use it in production and pocket the difference. That comparison is worth running — at real volume the gap compounds, and it's cheap to measure now.
 
 ## Reading the output
 
@@ -188,8 +240,22 @@ has been parsed yet.
 ## What the result means
 
 - **Most statements PASS** → the design in `../DESIGN.md` holds. Go to Phase 1.
-- **Systematic FAILs at one bank** → look at that bank's `out/*.txt`. Usually a layout the text extractor mangles, or a section (fees, FX sublines, instalments) not being counted. Cheap to fix.
+- **Systematic FAILs at one bank** → look at that bank's `out\*.txt`. Usually a layout the text extractor mangles, or a section (fees, FX sublines, instalments) not being counted. Cheap to fix.
 - **FAILs scattered everywhere** → the LLM-first approach is too loose. Fall back to per-bank template parsers, and expect real work per bank.
 - **Mostly `UNVERIFIED`** → the trust gate can't function. This is the worst outcome, because it means you can never distinguish a good parse from a bad one automatically. Revisit before building further.
 
 Record the verdict table in the PR or an issue. It's the input to every Phase 1 decision.
+
+## Comparing providers
+
+Because the reconciliation gate is the same everywhere, provider choice becomes
+a measurement rather than a guess. Run the same statements through each and
+compare:
+
+```
+statement      opus-5    qwen3.6:35b-a3b
+dbs.pdf        PASS      PASS      <- local is good enough, use it
+uob.pdf        PASS      FAIL      <- this bank needs the better model
+```
+
+If local passes everywhere, you're done and it costs nothing from here on.

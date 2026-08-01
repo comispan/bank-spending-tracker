@@ -317,6 +317,21 @@ class OllamaClient:
         self.http = httpx.Client(timeout=httpx.Timeout(600.0, connect=10.0))
 
     def chat(self, system: str, user: str, schema: dict) -> str:
+        import httpx
+        try:
+            return self._post(system, user, schema)
+        except httpx.ConnectError:
+            raise SystemExit(
+                f"Can't reach Ollama at {self.url}.\n"
+                f"Start it (`ollama serve`, or launch the Ollama app) and retry."
+            ) from None
+        except httpx.HTTPStatusError as e:
+            hint = ""
+            if e.response.status_code == 404:
+                hint = f"\nIs the model pulled?  ollama pull {MODEL}"
+            raise SystemExit(f"Ollama returned {e.response.status_code}.{hint}") from None
+
+    def _post(self, system: str, user: str, schema: dict) -> str:
         r = self.http.post(self.url, json={
             "model": MODEL,
             "messages": [
@@ -563,8 +578,22 @@ def main() -> int:
     client, extract_fn = (None, None)
     if not args.dry_run:
         client, extract_fn = build_client()
-        where = os.environ.get("SPIKE_BASE_URL", "api.anthropic.com")
-        print(f"Extracting with {MODEL} via {where}")
+        provider = os.environ.get("SPIKE_PROVIDER", "anthropic").lower()
+        where = {
+            "ollama": os.environ.get("SPIKE_BASE_URL", "http://localhost:11434"),
+            "openai": os.environ.get("SPIKE_BASE_URL", "?"),
+        }.get(provider, "api.anthropic.com")
+
+        # Easy mistake: set SPIKE_PROVIDER but forget SPIKE_MODEL, and the
+        # Claude default gets sent to Ollama, which fails with a confusing
+        # "model not found" rather than telling you what actually went wrong.
+        if provider != "anthropic" and MODEL.startswith("claude-"):
+            raise SystemExit(
+                f"SPIKE_PROVIDER={provider} but SPIKE_MODEL is still {MODEL!r}.\n"
+                f"Set SPIKE_MODEL to a model that provider serves."
+            )
+
+        print(f"Extracting with {MODEL} via {provider} @ {where}")
 
     results = [process(f, passwords, args.dry_run, client, extract_fn) for f in files]
 
