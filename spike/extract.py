@@ -675,7 +675,7 @@ def main() -> int:
         print(f"No PDFs in {STATEMENTS}/ — drop statements there and re-run.")
         return 1
 
-    client, extract_fn = (None, None)
+    client, extract_fn, mode = None, None, "text"
     if not args.dry_run:
         client, extract_fn = build_client()
         provider = os.environ.get("SPIKE_PROVIDER", "anthropic").lower()
