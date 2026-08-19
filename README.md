@@ -2,7 +2,7 @@
 
 Upload card statement PDFs → get a categorized monthly spending report across all your cards.
 
-**Status:** design phase. No code yet.
+**Status:** design phase. The Phase 0 spike is done — see [spike/](spike/).
 
 See **[DESIGN.md](DESIGN.md)** for the architecture, data model, and build plan.
 
@@ -15,4 +15,10 @@ See **[DESIGN.md](DESIGN.md)** for the architecture, data model, and build plan.
 
 ## Next step
 
-Phase 0 spike: take 5–10 real statements and check whether extraction reconciles. Everything else waits on that answer. See DESIGN.md §8.
+Phase 0 asked whether extraction reconciles. It does: across six real statements from six
+different issuers, every one reconciles against the statement's own printed figures.
+It also answered a question we didn't ask — extraction needs no model at all. The PDF text
+layer already carries the table, so it's parsed in code, offline, in milliseconds.
+See [spike/README.md](spike/README.md).
+
+Phase 1 next. See DESIGN.md §8.

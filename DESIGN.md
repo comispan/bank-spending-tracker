@@ -34,7 +34,9 @@ Everything else in this app is CRUD. **The entire risk is in PDF extraction.** S
 - **Often password-protected.** Many banks encrypt with a DOB/last-4 password.
 - **Full of things that are not spending.** Payments to the card, balance transfers, interest, previous balance, rewards redemptions, FX conversion sublines, "continued on next page" fragments.
 
-A design that assumes "parse the PDF into a table" will fail on statement #2. The design below assumes extraction is **probabilistic and must be verified**.
+A design that assumes "parse the PDF into a table" will fail on statement #2. The design below assumes extraction **must be verified**, whatever produced it.
+
+> **Phase 0 result (2026-08-19).** Extraction turned out to be the *easy* part, and needs no model at all. `pdfplumber.extract_text(layout=True)` recovers the transaction table on all five issuers tested; parsing it is ~300 lines of Python. Six statements, six reconciliations, 182 ms/page, fully offline. The sections below have been rewritten to match. See [spike/README.md](spike/README.md) for the evidence.
 
 ### 2.1 Extraction pipeline
 
@@ -43,16 +45,13 @@ PDF
  │
  ├─ 0. Decrypt (prompt user for password if needed)
  │
- ├─ 1. Text-layer extraction  (pdfjs / pdfplumber → glyphs with x,y,font)
+ ├─ 1. Text-layer extraction  (pdfplumber, layout=True → aligned columns)
  │       │
- │       └─ if < ~100 chars of text → it's a scan → OCR (Tesseract, or a
- │          vision model) → produces a text layer, continue
+ │       └─ if < ~100 chars of text → it's a scan → report and skip
+ │          (OCR is Phase 4; never treat a scan as "no transactions")
  │
- ├─ 2. Issuer fingerprint  (regex on header text: bank name, statement
- │       format markers) → look up a known template
- │       │
- │       ├─ template hit  → deterministic parser (fast, free, exact)
- │       └─ template miss → LLM structured extraction (see 2.2)
+ ├─ 2. Parse rows deterministically (see 2.2) — dates off the front of each
+ │       line, amount off the end, summary figures by label
  │
  ├─ 3. Normalize → Transaction[] (date, description, amount, sign, currency)
  │
@@ -61,11 +60,21 @@ PDF
  └─ 5. Persist + hand to categorizer
 ```
 
-**Why both a template path and an LLM path.** The LLM path is what makes the app work on day one with any bank. The template path is what makes it cheap, fast, and deterministic once a bank is known. Practically: an LLM parse that verifies cleanly can be used to *propose* a template (the column x-ranges, date format, section markers) that a human confirms once; after that, that issuer is free forever. Start with LLM-only, harvest templates for the top issuers your users actually upload.
+**Why there is no LLM path.** There was one, and removing it was the main finding of Phase 0. The layout-preserved text already *is* the table — asking a model to find it was asking it to redo solved work, and that was the step small local models failed at silently, by returning an empty array. One parser, no fallback, no provider choice, nothing leaving the machine.
 
-### 2.2 LLM extraction
+**Why no issuer templates either, yet.** The generic parser handled five different issuers with no per-bank code. Templates are the answer if a sixth bank breaks it, not before — and the trust gate below tells you the moment one does.
 
-Give the model the page text **with layout preserved** (x-position-aware line reconstruction, not naive `extractText()` which scrambles columns), and ask for strict JSON:
+### 2.2 Deterministic extraction
+
+Implemented in `spike/rows.py`; lift it into the app as-is. Page text with layout preserved (`extract_text(layout=True)` — **not** naive `extract_text()`, which interleaves columns and destroys the table), then per line:
+
+- **Peel up to two dates off the front** — transaction date and posting date. An inline year must be four digits: a two-digit year is indistinguishable from the day of the next date, and `27 JUN 28 JUN` collapsing to one date silently halves every issuer that prints both.
+- **Take the amount off the end**, with whatever signals direction — trailing `CR`/`DR`, leading `+`/`-`, accounting parentheses. Default debit; reconciliation contradicts it loudly if wrong.
+- **Resolve the year once per document.** Only page 1 prints a period or a four-digit year; doing it per page discards every row after page one and looks exactly like a quiet month.
+- **Read summary figures from a narrow label list**, plus horizontal summary grids where figures sit in one row with labels stacked above (MariBank and Trust both do this). Take only opening and closing balance from a grid — MariBank splits one credit across two component columns, so lifting one into `total_credits` FAILs a correct extraction by 14 cents.
+- **A dated row whose text opens with a summary label is not a transaction.** Trust rules its opening and closing balance into the table; counted as purchases they inflated debits from 115.82 to 1953.82.
+
+The output shape, unchanged from the original design:
 
 ```json
 {
@@ -84,10 +93,10 @@ Give the model the page text **with layout preserved** (x-position-aware line re
 ```
 
 Notes that matter:
-- **Page-at-a-time, not whole-document.** Bounds token cost, keeps accuracy high on 20-page statements, and lets transactions that straddle a page break be stitched in step 3.
-- **Ask for the summary figures too** (opening/closing/totals). They are the checksum. This is the single highest-leverage line in this design.
+- **Page-at-a-time, stitched afterwards**, so a transaction straddling a page break survives — but the *period and year* are resolved from the whole document first, then handed to each page.
+- **Capture the summary figures too** (opening/closing/totals). They are the checksum. This is still the single highest-leverage line in this design.
 - Amounts as decimal strings → parse to integer minor units. Never floats in the DB.
-- Model: a mid-tier model (e.g. `claude-sonnet-5`) is right for this; escalate to `claude-opus-5` only on verification failure. Cache the system prompt.
+- **Keep an independent row-shape count** (`count_txn_shaped_lines`), computed by a *separate* regex from the parser. Comparing the two numbers is how you find out the parser dropped rows the page actually had. It is the check that caught both real bugs in Phase 0.
 
 ### 2.3 Verification — the trust gate
 
@@ -99,9 +108,11 @@ An extraction is **accepted** only if it self-reconciles:
 
 Also check: every transaction date falls inside the statement period (±5 days for posting lag); no duplicate (date, amount, description) triples within one statement; transaction count is plausible for the page count.
 
-On failure: **do not silently import.** Retry once with a stronger model; if it still fails, put the statement in a "Needs review" state and show the user a side-by-side of the PDF page and the parsed rows so they can fix it in a few clicks. Silently-wrong financial data is far worse than an honest "I couldn't read this one."
+On failure: **do not silently import.** Put the statement in a "Needs review" state and show the user a side-by-side of the PDF page and the parsed rows so they can fix it in a few clicks. Silently-wrong financial data is far worse than an honest "I couldn't read this one."
 
 This gate is what makes the app trustworthy. Build it in the same PR as the parser, not later.
+
+Phase 0 ran it on six statements from five issuers and all six reconciled. Two of the bugs it caught would have been invisible otherwise — a wrong parse that reported `unverified` looks identical to a statement that simply can't be checked. **Treat `unverified` as a defect to investigate, not a resting state**; both Phase 0 bugs were hiding under it.
 
 ---
 
@@ -114,6 +125,8 @@ Three tiers, cheapest first. Each transaction is resolved by the first tier that
 | 1 | **User rules** — merchant pattern → category, set by the user, always wins | free | ~10% |
 | 2 | **Merchant memory** — normalized merchant string → category learned from every prior decision (the user's own + a shared seed list) | free, one index lookup | ~75% |
 | 3 | **LLM** — batch of unknown merchants → category, one call for the whole batch | ~cents | the rest |
+
+**This is now the only place a model appears in the app.** Extraction (§2.2) sends nothing anywhere, so the disclosure question from §9 lands here and only here — and it is a much smaller question: tier 3 sends a *list of normalized merchant names* (`grab`, `fairprice`, `netflix`), not statement text. No amounts, no dates, no balances, no card numbers. A local model is entirely adequate for this shape of task if you would rather it stayed offline; classifying a short string is what small models are good at, which is precisely what Phase 0 found.
 
 **Merchant normalization** is what makes tier 2 work. `GRAB *TRIP 4821 SINGAPORE`, `GRAB* TRIP 9903`, and `Grab Trip SG` must all collapse to `grab`. Strip: trailing numerics, `*` segments, city/country suffixes, POS terminal IDs, dates embedded in the description, `SQ *`/`PAYPAL *`/`AMZN Mktp` style processor prefixes (keep what follows). Lowercase, squash whitespace. Store both `description_raw` and `merchant_normalized`.
 
@@ -143,7 +156,7 @@ Two traps here, both worth designing around explicitly:
 
 Dedup key: `(account_id, date ±3 days, amount, merchant_normalized)`. Two matches → keep the earlier-ingested one, flag the other as `suspected_duplicate` rather than hard-deleting, and let the user confirm. Also hash the file (SHA-256) so re-uploading the identical PDF is caught instantly and cheaply.
 
-**Multi-currency.** If any statement is not in the user's base currency, store the original amount + currency + the FX rate the *statement itself* printed (banks include it). Convert at that rate, not at today's rate. If no rate is printed, fall back to a daily rate table and mark the figure as approximate.
+**Multi-currency — decided: SGD base, store both.** Reports are single-currency SGD. Every transaction also keeps its original amount and currency, converted at the FX rate the *statement itself* printed, not today's rate. This is live, not hypothetical: the Trust statement in the Phase 0 set has an HKD charge with the rate printed on the page (`102.67 HKD × 0.1655 = 16.99 SGD`). If no rate is printed, fall back to a daily rate table and mark the figure approximate.
 
 **The monthly report** (the actual product):
 - Total spend, vs. prior month, vs. 3-month average.
@@ -159,45 +172,49 @@ That last one — **every number traces back to a page in a PDF** — is what ma
 
 ## 5. Data model
 
+Single-user, so there is no `user` table and no `user_id` anywhere. Base currency is SGD, a constant.
+
 ```
-user            id, email, base_currency
-account         id, user_id, issuer, kind(credit|debit|bank), last4, nickname, currency
-statement       id, user_id, account_id, file_sha256, storage_key, period_start,
+account         id, issuer, kind(credit|debit|bank), last4, nickname, currency
+statement       id, account_id, file_sha256, storage_key, period_start,
                 period_end, opening_balance, closing_balance, page_count,
-                parser(template|llm), parser_version, status(parsed|needs_review|failed),
-                confidence, raw_extraction jsonb
-transaction     id, user_id, account_id, statement_id,
+                parser_version, status(parsed|needs_review|failed),
+                verdict(pass|unverified|failed), verdict_detail,
+                rows_expected, rows_parsed, raw_extraction jsonb
+transaction     id, account_id, statement_id,
                 txn_date, posted_date,
                 description_raw, merchant_normalized,
-                amount_minor bigint, currency, amount_base_minor bigint, fx_rate,
+                amount_minor bigint, currency,          -- as printed
+                amount_sgd_minor bigint, fx_rate,       -- converted, statement's own rate
                 direction(debit|credit), flow_type(spend|refund|transfer|fee|income),
                 category, category_source(rule|memory|llm|user), category_confidence,
-                source_page, source_bbox,
+                source_page,
                 dedup_key, duplicate_of_id nullable
-merchant_rule   id, user_id nullable, pattern, match_type(exact|contains|regex),
+merchant_rule   id, pattern, match_type(exact|contains|regex),
                 category, flow_type, priority
-merchant_memory user_id, merchant_normalized, category, hit_count, updated_at
-issuer_template id, fingerprint_regex, layout jsonb, version, verified_by
+merchant_memory merchant_normalized, category, hit_count, updated_at
 ```
 
-Conventions worth locking in now: **money is `bigint` minor units, never float.** Dates are plain `DATE` (a transaction date has no timezone). `raw_extraction` is kept so a parser improvement can be replayed over old statements without asking users to re-upload — this will save you at least once.
+`issuer_template` is gone — one generic parser handles all five issuers. Add it back when a bank actually breaks, not in anticipation.
+
+`rows_expected` / `rows_parsed` store the independent row-shape count against what the parser produced. A gap is the earliest warning that a layout changed; it is worth a column precisely because it is invisible otherwise.
+
+Conventions worth locking in now: **money is `bigint` minor units, never float.** Dates are plain `DATE` (a transaction date has no timezone). `raw_extraction` is kept so a parser improvement can be replayed over old statements without re-uploading — and because extraction is now deterministic and free, replaying the whole corpus through a new parser version takes seconds and gives byte-identical results for anything that didn't change. That is a much stronger position than the original design assumed.
 
 ---
 
 ## 6. Stack
 
-Recommended, optimizing for "one person can build and run this":
+**Decided: Python throughout.** The extractor already works in Python and is the one component proven against real statements; a service boundary around a 182 ms function is not worth crossing.
 
-- **Next.js (TypeScript), App Router** — one deployable, server actions for the CRUD, React for the report UI.
-- **Postgres** (Supabase/Neon) + **Prisma**. The queries here are grouped sums; Postgres is more than enough.
-- **Object storage** for the PDFs (S3/R2/Supabase Storage), private buckets, signed URLs only.
-- **Extraction worker**: a queue (pg-boss on the same Postgres, or Inngest/Trigger.dev) — parsing a 20-page statement takes 10–60s, which must not happen in a request handler. Upload returns immediately; UI polls or subscribes for status.
-- **PDF text**: `pdfjs-dist` (Node) or **`pdfplumber` (Python)** if you want the better layout primitives — a small Python extraction service is a legitimate choice here, and `pdfplumber`'s word/table tooling is genuinely stronger than anything in JS.
-- **OCR fallback**: Tesseract, or send page images to a vision model (simpler, better on statements, costs money).
-- **LLM**: Anthropic API. `claude-sonnet-5` for extraction and categorization, `claude-opus-5` on retry.
-- **Charts**: Recharts or Observable Plot.
-
-If you'd rather do the whole thing in Python: FastAPI + pdfplumber + HTMX/Jinja is a smaller, very defensible v1.
+- **FastAPI + Jinja + HTMX.** Server-rendered, one process, no client build step. The interactions here are upload, a table, and a recategorize dropdown — HTMX covers all of them.
+- **SQLite**, single file, on the same machine. Single-user with a few thousand rows a year: Postgres buys nothing here and costs setup. `bigint` minor units and plain `DATE` behave fine. Move to Postgres if this ever becomes multi-user.
+- **PDF text**: `pdfplumber`. Its word/layout primitives are stronger than anything in JS, which is what made §2.2 possible.
+- **No queue, no worker.** Parsing measured 182 ms/page — a 4-page statement is under a second, a 20-page one about 3.6s. Parse inside the request with a spinner. `pg-boss`, job status polling, and the whole async subsystem in the original design existed to hide a 10–60s LLM round-trip that no longer happens.
+- **Local files, not object storage.** Single-user and self-hosted: PDFs go in a directory the app owns. No buckets, no signed URLs, no lifecycle rules.
+- **Categorization LLM** (§3, tier 3 only): Anthropic `claude-sonnet-5`, or a local model — it classifies short merchant strings, which is well within a small model.
+- **OCR fallback**: deferred to Phase 4. No statement in the Phase 0 set needed it.
+- **Charts**: server-rendered SVG, or Observable Plot if you want interactivity.
 
 ---
 
@@ -205,10 +222,13 @@ If you'd rather do the whole thing in Python: FastAPI + pdfplumber + HTMX/Jinja 
 
 This app holds a complete record of someone's spending. Treat that seriously — it's a category of data where a leak is genuinely damaging.
 
-- Encrypt PDFs at rest; scope every storage key to the user; signed URLs with short TTLs. Never a public bucket.
-- **Every query filters by `user_id`.** Enforce it at the DB layer (RLS) so a missing `WHERE` in one handler isn't a full data breach.
+Single-user and self-hosted removes most of the original surface here — there is no tenant boundary to breach, no bucket to misconfigure, and no `user_id` to forget in a `WHERE` clause. What remains still matters:
+
+- **Extraction discloses nothing.** No API key, no provider, no data terms to read. This was the largest item on this list and Phase 0 deleted it.
 - Statement passwords: use to decrypt in memory, **never store**.
-- Sending statement text to an LLM API is a real disclosure — say so plainly in the UI, and use a provider with no-training-on-inputs terms. Redact full card numbers before the call (you only ever need last-4).
+- The only outbound call is categorization (§3, tier 3), and only normalized merchant names — no amounts, dates, or balances. Say so plainly in the UI. Use a provider with no-training-on-inputs terms, or run it locally.
+- Full card numbers are masked to last-4 at parse time (`redact()`), before anything is stored or written to disk.
+- Don't bind the server to `0.0.0.0`. Localhost only unless you have deliberately decided otherwise.
 - Offer hard delete: purge PDFs, transactions, and derived data.
 - Don't log statement text or transaction descriptions.
 - No third-party analytics on any page that renders financial data.
@@ -219,12 +239,20 @@ This app holds a complete record of someone's spending. Treat that seriously —
 
 Each phase ends with something you can actually use.
 
-**Phase 0 — Spike (1–2 days). Do this before committing to anything above.**
-Collect 5–10 *real* statements from the banks you actually use. Write a throwaway script: text-extract → LLM → JSON → check the totals reconcile. No UI, no DB.
-This tells you within two days whether the product is easy or hard, and which bank breaks it. If reconciliation passes on most of them, the rest of this plan is straightforward engineering. **Every downstream decision should wait on this result.**
+**Phase 0 — Spike. ✅ Done 2026-08-19.**
+Six statements from five Singapore issuers (DBS, MariBank, Standard Chartered, Trust, UOB) plus a synthetic control. **6/6 reconcile.** Extraction needs no model; see §2.2 and [spike/README.md](spike/README.md). The answer is "easy" — the remaining risk is in the CRUD, which is the good outcome.
 
-**Phase 1 — Single statement, end to end (~1 week).**
-Upload → store → parse job → verify → transactions table in the UI. One card, no categories yet. Ship the "needs review" state now, not later.
+**Phase 1 — Single statement, end to end (~3–4 days, revised down).**
+Upload → parse → verify → transactions table. One card, no categories yet. Ship the "needs review" state now, not later.
+
+Smaller than originally planned, because Phase 0 removed the queue, the worker, the job-status polling, the object storage, and the auth layer. What's actually left:
+
+1. Lift `spike/rows.py` in unchanged. It is the proven component — don't rewrite it while porting.
+2. SQLite schema per §5, plus the migration discipline to add to it later.
+3. Upload form → save PDF to a local directory → SHA-256 → parse → persist. Synchronous.
+4. The gate (§2.3) writing `verdict` onto the statement, and a **statement list that shows it**. A `pass` you can't see is worth nothing.
+5. Needs-review screen: parsed rows beside the source page. This is where a `fail` or `unverified` gets resolved, and Phase 0 proved you will use it.
+6. Dedup on `file_sha256` at minimum — re-uploading the same PDF must be caught. Full transaction-level dedup can wait for Phase 3, but note that UOB already has two genuinely identical same-day rows, so **never dedup silently within a single statement**.
 
 **Phase 2 — Categorization (~1 week).**
 Three-tier resolver, merchant normalization, inline recategorize with "apply to all matching." Seed merchant memory with a few hundred common merchants.
@@ -233,18 +261,18 @@ Three-tier resolver, merchant normalization, inline recategorize with "apply to 
 Multiple accounts, dedup, calendar-month bucketing, the monthly report page with drill-through. This is the point where the app becomes the thing you described.
 
 **Phase 4 — Hardening (ongoing).**
-Encrypted-PDF passwords, OCR path, issuer templates for your top banks, CSV/Excel export, multi-currency, replay-old-statements-with-new-parser tooling.
+OCR path for scanned statements, CSV/Excel export, replay-old-statements-with-new-parser tooling, issuer-specific summary labels as new banks arrive. Encrypted-PDF passwords and multi-currency are already handled — Phase 0 shipped the empty-password path (DBS needs it) and §4 settles currency.
 
 **Deliberately deferred:** budgets, forecasting, recurring-subscription detection (nice, and easy once you have clean data — but it's a different product surface), bank API sync, mobile.
 
 ---
 
-## 9. Decisions you should make before Phase 1
+## 9. Decisions — settled 2026-08-19
 
-1. **Which banks?** Get the real statement set. This drives everything.
-2. **Base currency** — single-currency v1 is meaningfully simpler; take it if you can.
-3. **Self-hosted / single-user, or a real multi-tenant product?** Single-user lets you skip auth, RLS, and most of §7 and cuts the build roughly in half. If it's just for you, say so and the plan gets much shorter.
-4. **Is sending statement text to an LLM acceptable to you?** If not, the design changes substantially — it becomes template-parsers-only, which means real per-bank work up front and no zero-shot support for a new bank.
+1. **Which banks?** DBS, MariBank, Standard Chartered, Trust, UOB. All five parse and reconcile today.
+2. **Base currency?** SGD, with each transaction keeping its original amount, currency and the statement's own FX rate. Driven by a real HKD charge in the Trust statement, not a hypothetical.
+3. **Single-user or multi-tenant?** **Single-user, self-hosted.** No auth, no RLS, no tenant scoping. Roughly halves the build and removes most of §7.
+4. **Is sending statement text to an LLM acceptable?** Moot for extraction — nothing leaves the machine. The question survives only for categorization (§3, tier 3), which sends normalized merchant names and no figures at all. Decide it in Phase 2; a local model is a legitimate answer.
 
 ---
 
@@ -252,8 +280,9 @@ Encrypted-PDF passwords, OCR path, issuer templates for your top banks, CSV/Exce
 
 Stated honestly, because they will bite:
 
-- **Layout changes break template parsers silently.** Mitigation: the verification gate catches it as a reconciliation failure rather than as wrong data. Keep the LLM fallback live even for templated issuers.
-- **Statements without printed totals can't be verified.** Some don't have them. Those imports are `unverified` and should be visually marked as such in the report.
+- **A layout change breaks the parser silently.** Mitigation: the gate catches it as a reconciliation failure rather than as wrong data, and `rows_expected` vs `rows_parsed` catches the subtler case where rows vanish but the remainder still balances. There is no LLM fallback to fall back to — if a new issuer defeats the parser, you write code, and the gate tells you when you are done.
+- **`unverified` is where wrong data hides.** Both real bugs in Phase 0 were sitting under it: a statement whose totals can't be found looks exactly like a statement whose parse is wrong. Trust reported `unverified` while over-counting debits by 1838.00. Treat every `unverified` as a defect to chase down, and show it in the report as an honest gap rather than a quiet zero.
+- **Two of five issuers hide their summary figures** in a horizontal grid with labels stacked above the numbers. A sixth bank will find a sixth way. Budget for summary-label work per new issuer even though row parsing generalizes well.
 - **OCR on a bad scan will produce wrong digits**, and `8`/`3` and `1`/`7` confusions survive plausibility checks. Reconciliation catches most; force manual review on any OCR'd statement that doesn't reconcile exactly.
 - **Cash spending is invisible.** The app can never be a complete picture of spending, only of card spending. Don't let the UI imply otherwise.
 - **Refund/original matching across statement boundaries** (buy in June, refund in August) will misstate both months. v1: net within the month only, and note it.
