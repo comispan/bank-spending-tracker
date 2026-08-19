@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from decimal import Decimal, InvalidOperation
+from typing import NamedTuple
 
 MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -169,8 +170,29 @@ LAST4_RE = re.compile(r"(?:\*{2,}|x{4,}|X{4,}|•{2,})[\s-]*(\d{4})\b")
 CURRENCY_RE = re.compile(r"\b(SGD|USD|EUR|GBP|AUD|JPY|MYR|HKD)\b")
 YEAR_RE = re.compile(r"\b(20[1-4]\d)\b")
 
+# Most issuers print a closing date rather than a range: "Statement Date: 16 Jul
+# 2026". That single date is a far better year anchor than counting which year
+# appears most often on the page, because it says which cycle the rows are in.
+# The date must be on the same line, so DBS's bare "STATEMENT DATE" column
+# header — whose value sits in a row underneath — correctly does not match.
+STATEMENT_DATE_RE = re.compile(
+    rf"""(?ix)
+    statement \s+ date \s*:?\s+
+    (?P<d>\d{{1,2}}[ /-](?:{MONTH_RE})[a-z]*[ /-]\d{{2,4}}
+        |\d{{1,2}}/\d{{1,2}}/\d{{2,4}}
+        |\d{{4}}-\d{{2}}-\d{{2}})
+    """
+)
 
-def document_context(texts: list[str]) -> tuple[tuple[str | None, str | None], int | None]:
+
+class Context(NamedTuple):
+    """What the whole document says about when it is from."""
+    period: tuple[str | None, str | None] = (None, None)
+    year: int | None = None
+    statement_date: str | None = None
+
+
+def document_context(texts: list[str]) -> Context:
     """Resolve the period and year once for the whole statement, not per page.
 
     Only the first page tends to print the statement period or any four-digit
@@ -196,7 +218,10 @@ def document_context(texts: list[str]) -> tuple[tuple[str | None, str | None], i
             counts[int(y)] = counts.get(int(y), 0) + 1
         fallback = max(counts, key=lambda y: (counts[y], y))
 
-    return period, fallback
+    m = STATEMENT_DATE_RE.search(joined)
+    statement_date = _parse_loose_date(m.group("d")) if m else None
+
+    return Context(period, fallback, statement_date)
 
 
 def _iso(parts: tuple[int, int, int | None]) -> str | None:
@@ -215,13 +240,17 @@ def _parse_loose_date(raw: str) -> str | None:
 
 
 def resolve_year(day: int, month: int, period: tuple[str | None, str | None],
-                 fallback_year: int | None) -> int | None:
+                 fallback_year: int | None, statement_date: str | None = None) -> int | None:
     """Pick the year for a row that printed only day and month.
 
     A statement spanning a year boundary is normal — a December row on a
     statement ending in January belongs to the earlier year — so choose the
     candidate that actually lands inside the period rather than assuming the
     end year.
+
+    "Whichever year appears most often on the page" is the last resort, and it
+    is wrong exactly in January, which is when nobody is looking. A printed
+    statement date avoids it for most issuers.
     """
     start, end = period
     if start and end:
@@ -233,6 +262,13 @@ def resolve_year(day: int, month: int, period: tuple[str | None, str | None],
             except ValueError:
                 continue
         return hi.year
+
+    if statement_date:
+        # Rows fall on or before the closing date, so a month *later* than the
+        # statement's own month must belong to the previous year.
+        closing = dt.date.fromisoformat(statement_date)
+        return closing.year if month <= closing.month else closing.year - 1
+
     return fallback_year
 
 
@@ -378,7 +414,7 @@ def _description_below(lines: list[str], i: int, lookahead: int = 2) -> str:
 
 
 def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
-               fallback_year: int | None = None) -> dict:
+               fallback_year: int | None = None, statement_date: str | None = None) -> dict:
     """Parse one page of layout-preserved statement text into the record shape."""
     out: dict = {
         "issuer": None, "account_last4": None,
@@ -442,7 +478,7 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
                 continue
 
             day, month, year = dates[0]
-            year = year or resolve_year(day, month, period, fallback_year)
+            year = year or resolve_year(day, month, period, fallback_year, statement_date)
             if year is None:
                 continue
             try:
@@ -452,7 +488,7 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
             posted = None
             if len(dates) > 1:
                 pd, pm, py = dates[1]
-                py = py or resolve_year(pd, pm, period, fallback_year)
+                py = py or resolve_year(pd, pm, period, fallback_year, statement_date)
                 posted = _iso((pd, pm, py))
             out["transactions"].append({
                 "date": iso, "posted_date": posted, "description": description,

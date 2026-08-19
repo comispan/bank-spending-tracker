@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Transactions{% endblock %}
+{% block content %}
+
+<h1>{{ txns|length }} transactions</h1>
+<p class="hint">
+  Every card, newest first. Categories arrive in Phase 2 and the monthly report
+  in Phase 3 — this list is deliberately just the parsed rows.
+</p>
+
+{% if not txns %}
+  <p class="empty">Nothing yet. <a href="/">Upload a statement.</a></p>
+{% else %}
+<table>
+  <thead>
+    <tr><th>Date</th><th>Account</th><th>Description</th><th class="num">Amount</th><th>Dir</th></tr>
+  </thead>
+  <tbody>
+  {% for t in txns %}
+    <tr>
+      <td class="date">{{ t.txn_date }}</td>
+      <td class="muted">{{ t.issuer }}{% if t.last4 %} ····{{ t.last4 }}{% endif %}</td>
+      <td>{{ t.description_raw }}</td>
+      <td class="num {{ t.direction }}">{{ t.amount_sgd_minor | money }}</td>
+      <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endblock %}

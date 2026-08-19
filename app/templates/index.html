@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="card">
+  <h1>Upload a statement</h1>
+  <form method="post" action="/upload" enctype="multipart/form-data" class="upload">
+    <input type="file" name="file" accept="application/pdf" required>
+    <input type="password" name="password" placeholder="PDF password (only if locked)" autocomplete="off">
+    <button type="submit">Upload &amp; parse</button>
+  </form>
+  <p class="hint">
+    Parsed on this machine. Nothing is sent anywhere, and any password is used to
+    decrypt in memory and never stored.
+  </p>
+</section>
+
+<h2>Statements</h2>
+
+{% if not statements %}
+  <p class="empty">Nothing uploaded yet.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Statement</th><th>Period</th><th class="num">Pages</th>
+      <th class="num">Rows</th><th>Verdict</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for s in statements %}
+    <tr>
+      <td>
+        <a href="/statements/{{ s.id }}">{{ s.issuer }}{% if s.last4 %} ····{{ s.last4 }}{% endif %}</a>
+        <span class="file">{{ s.filename }}</span>
+      </td>
+      <td class="date">{{ s | period }}</td>
+      <td class="num">{{ s.page_count }}</td>
+      <td class="num">
+        {{ s.txn_count }}
+        {%- if s.rows_expected > s.rows_parsed %}
+          <span class="gap" title="An independent scan found {{ s.rows_expected }} date-and-amount lines">of {{ s.rows_expected }}</span>
+        {%- endif %}
+      </td>
+      <td>
+        <span class="verdict {{ s.verdict }}">{{ s.verdict }}</span>
+        <span class="detail">{{ s.verdict_detail }}</span>
+      </td>
+      <td class="actions">
+        {% if s.verdict != "pass" %}<a href="/statements/{{ s.id }}/review">Review</a>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p class="hint">
+  <strong>unverified</strong> is not a pass. It means the statement printed no
+  totals to check against — which looks identical to a parse that is simply
+  wrong. Both bugs found during the spike were hiding there.
+</p>
+{% endif %}
+
+{% endblock %}

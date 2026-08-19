@@ -3,6 +3,9 @@ spike/statements/
 spike/out/
 spike/passwords.json
 
+# App data: uploaded statement PDFs and the local database.
+data/
+
 .venv/
 __pycache__/
 *.pyc
