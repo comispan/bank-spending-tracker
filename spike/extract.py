@@ -28,7 +28,9 @@ from pathlib import Path
 import pdfplumber
 import pypdf
 
-import rows
+# rows.py moved into the app; the spike is the regression harness for it.
+sys.path.insert(0, str(Path(__file__).parent.parent / "app"))
+import rows  # noqa: E402
 
 HERE = Path(__file__).parent
 STATEMENTS = HERE / "statements"
@@ -301,10 +303,10 @@ def process(path: Path, passwords: dict, dry_run: bool) -> Result:
     # One pass over the whole document first: the statement period and the year
     # are almost always printed only on page 1, and every later page needs them
     # to date a bare "12 JUN" row.
-    (period_start, period_end), doc_year = rows.document_context([p.text for p in pages])
+    ctx = rows.document_context([p.text for p in pages])
 
     extracted = [
-        rows.parse_page(p.text, (period_start, period_end), doc_year)
+        rows.parse_page(p.text, ctx.period, ctx.year, ctx.statement_date)
         for p in pages if not p.looks_scanned
     ]
 

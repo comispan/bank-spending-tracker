@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Spending Tracker{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <a class="brand" href="/">Spending Tracker</a>
+    <nav>
+      <a href="/">Statements</a>
+      <a href="/transactions">Transactions</a>
+    </nav>
+  </header>
+
+  <main>
+    {% if error %}<div class="banner error">{{ error }}</div>{% endif %}
+    {% if notice %}<div class="banner notice">{{ notice }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ s.issuer }} — {{ s.period_end or s.filename }}{% endblock %}
+{% block content %}
+
+<nav class="crumbs"><a href="/">Statements</a> / {{ s.filename }}</nav>
+
+<div class="head">
+  <h1>{{ s.issuer }}{% if s.last4 %} <span class="last4">····{{ s.last4 }}</span>{% endif %}</h1>
+  <form method="post" action="/statements/{{ s.id }}/delete"
+        onsubmit="return confirm('Delete this statement and its {{ txns|length }} transactions? The PDF is deleted too.')">
+    <button class="danger" type="submit">Delete</button>
+  </form>
+</div>
+
+<div class="verdict-block {{ s.verdict }}">
+  <span class="verdict {{ s.verdict }}">{{ s.verdict }}</span>
+  <span>{{ s.verdict_detail }}</span>
+</div>
+
+{% if warnings %}
+<ul class="warnings">
+  {% for w in warnings %}<li>{{ w }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+<dl class="facts">
+  <div><dt>Period</dt><dd>{{ s | period }}</dd></div>
+  <div><dt>Opening balance</dt><dd class="num">{{ s.opening_balance_minor | money }}</dd></div>
+  <div><dt>Closing balance</dt><dd class="num">{{ s.closing_balance_minor | money }}</dd></div>
+  <div><dt>Debits</dt><dd class="num">{{ totals.debits | money }}</dd></div>
+  <div><dt>Credits</dt><dd class="num">{{ totals.credits | money }}</dd></div>
+  <div><dt>Rows parsed</dt><dd class="num">{{ s.rows_parsed }} of {{ s.rows_expected }} found</dd></div>
+  <div><dt>Pages</dt><dd class="num">{{ s.page_count }}</dd></div>
+  <div><dt>Parser</dt><dd>v{{ s.parser_version }}</dd></div>
+</dl>
+
+<p class="links">
+  <a href="/statements/{{ s.id }}/review">Review against the page text</a> ·
+  <a href="/statements/{{ s.id }}/pdf" target="_blank" rel="noopener">Open the PDF</a>
+</p>
+
+<h2>{{ txns|length }} transactions</h2>
+<table>
+  <thead>
+    <tr><th>Date</th><th>Posted</th><th>Description</th><th class="num">Amount</th><th>Dir</th><th class="num">Page</th></tr>
+  </thead>
+  <tbody>
+  {% for t in txns %}
+    <tr>
+      <td class="date">{{ t.txn_date }}</td>
+      <td class="date muted">{{ t.posted_date or "" }}</td>
+      <td>{{ t.description_raw }}</td>
+      <td class="num {{ t.direction }}">{{ t.amount_minor | money }}</td>
+      <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
+      <td class="num muted">{{ t.source_page or "" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% endblock %}

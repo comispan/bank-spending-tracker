@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "app"))
 
 from extract import Result, read_text, reconcile, sanity_checks, write_text  # noqa: E402
 
@@ -197,12 +198,21 @@ def test_row_parsing() -> None:
     # needs it. Resolving per page drops every row after the first.
     page1 = "Statement Period: 15 Jun 2026 to 14 Jul 2026\n15 JUN  16 JUN  SHOP  10.00"
     page2 = "20 JUN  21 JUN  SHOP  20.00"
-    period, year = rows.document_context([page1, page2])
-    check("period found across the document", period == ("2026-06-15", "2026-07-14"), repr(period))
-    later = rows.parse_page(page2, period, year)
+    ctx = rows.document_context([page1, page2])
+    check("period found across the document", ctx.period == ("2026-06-15", "2026-07-14"), repr(ctx.period))
+    later = rows.parse_page(page2, ctx.period, ctx.year, ctx.statement_date)
     check("a page with no printed year still dates its rows",
           [t["date"] for t in later["transactions"]] == ["2026-06-20"],
           repr(later["transactions"]))
+
+    # Most issuers print a closing date, not a range. It is a better year anchor
+    # than "whichever year appears most often", which is wrong every January.
+    ctx = rows.document_context(["Statement Date: 15 Jan 2027", "28 DEC  29 DEC  SHOP  10.00"])
+    check("a lone statement date is picked up", ctx.statement_date == "2027-01-15", repr(ctx.statement_date))
+    rolled = rows.parse_page("28 DEC  29 DEC  SHOP  10.00", ctx.period, ctx.year, ctx.statement_date)
+    check("a December row on a January statement lands in the previous year",
+          [t["date"] for t in rolled["transactions"]] == ["2026-12-28"],
+          repr(rolled["transactions"]))
 
     # Due dates and rate tables are date-and-number lines too, and must not be
     # mistaken for transactions.
