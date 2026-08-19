@@ -157,40 +157,120 @@ def test_row_detection() -> None:
     check("ignores non-transaction lines", count_txn_shaped_lines([page(*non_rows)]) == 0)
 
 
-def test_page_rendering() -> None:
-    """Image mode is what lets a vision model read a scanned statement."""
-    print("\npage rendering (vision mode)")
-    import base64
-    import pypdfium2 as pdfium
-    from extract import read_pdf, render_page_png
+def test_row_parsing() -> None:
+    """The parser is the spike now, so this is where wrong answers come from."""
+    print("\nrow parsing")
+    import rows
 
-    tmp = Path(tempfile.mkdtemp())
-    blank = tmp / "blank.pdf"
-    doc = pdfium.PdfDocument.new()
-    doc.new_page(595, 842)
-    doc.save(str(blank))
-    doc.close()
+    # Two dates in a row must not be read as one date with a two-digit year.
+    # "27 JUN 28 JUN" losing its second date was the bug that silently halved
+    # every issuer that prints a posting date.
+    dates, rest = rows.leading_dates("27 JUN 28 JUN  MERCHANT  12.34")
+    check("two adjacent dates stay two dates", len(dates) == 2, repr(dates))
+    check("a four-digit year is still consumed",
+          rows.leading_dates("15 Jun 2026  X  1.00")[0] == [(15, 6, 2026)],
+          repr(rows.leading_dates("15 Jun 2026  X  1.00")[0]))
 
-    b64 = render_page_png(blank, 0, 2.0)
-    raw = base64.b64decode(b64)
-    check("renders a page to PNG", raw[:8] == b"\x89PNG\r\n\x1a\n", repr(raw[:8]))
+    # Direction, in each of the ways issuers express it.
+    cases = [
+        ("SHOP  12.34", "debit", "12.34"),
+        ("REFUND  89.90 CR", "credit", "89.90"),
+        ("CHARGE  5.00 DR", "debit", "5.00"),
+        ("TRANSFER  -55.94", "debit", "55.94"),
+        ("TOPUP  +250.00", "credit", "250.00"),
+        ("ADJUSTMENT  (18.20)", "debit", "18.20"),
+        ("BIG  1,234.56", "debit", "1234.56"),
+    ]
+    for text, want_dir, want_amt in cases:
+        got = rows.parse_amount(text)
+        ok = got and str(got[0]) == want_amt and got[1] == want_dir
+        check(f"{text.split()[0].lower()} -> {want_dir} {want_amt}", bool(ok), repr(got))
 
-    # A page with no text layer is a scan; auto mode must render it, text must not.
-    pages, _ = read_pdf(blank, None, "text")
-    check("scanned page detected", pages[0].looks_scanned)
-    check("text mode renders nothing", pages[0].image_b64 is None)
+    # A row printing only day and month takes its year from the period, and a
+    # December row on a statement ending in January belongs to the year before.
+    check("year comes from the period",
+          rows.resolve_year(15, 6, ("2026-06-15", "2026-07-14"), None) == 2026)
+    check("year boundary resolves backwards",
+          rows.resolve_year(28, 12, ("2025-12-15", "2026-01-14"), None) == 2025)
 
-    pages, _ = read_pdf(blank, None, "auto")
-    check("auto mode renders the scan", pages[0].image_b64 is not None)
+    # Whole-document context: the year is on page 1 only, and every later page
+    # needs it. Resolving per page drops every row after the first.
+    page1 = "Statement Period: 15 Jun 2026 to 14 Jul 2026\n15 JUN  16 JUN  SHOP  10.00"
+    page2 = "20 JUN  21 JUN  SHOP  20.00"
+    period, year = rows.document_context([page1, page2])
+    check("period found across the document", period == ("2026-06-15", "2026-07-14"), repr(period))
+    later = rows.parse_page(page2, period, year)
+    check("a page with no printed year still dates its rows",
+          [t["date"] for t in later["transactions"]] == ["2026-06-20"],
+          repr(later["transactions"]))
 
-    # A page that *does* have text should not be rendered under auto.
-    sample = HERE / "statements" / "sample-statement.pdf"
-    if sample.exists():
-        pages, _ = read_pdf(sample, None, "auto")
-        check("auto mode leaves text pages alone", pages[0].image_b64 is None)
-        pages, _ = read_pdf(sample, None, "image")
-        check("image mode renders regardless", pages[0].image_b64 is not None)
-        check("image mode drops the text transcript", pages[0].text == "")
+    # Due dates and rate tables are date-and-number lines too, and must not be
+    # mistaken for transactions.
+    noise = rows.parse_page("Payment Due Date: 04 Aug 2026\nInterest 27.80\n", ("2026-06-15", "2026-07-14"), 2026)
+    check("a due date is not a transaction", noise["transactions"] == [],
+          repr(noise["transactions"]))
+
+
+    # Trust rules its opening and closing balance into the transaction table,
+    # dated like any other row. Counted as purchases they roughly double the
+    # debit total, and the statement then reports UNVERIFIED, so nothing
+    # contradicts it.
+    table = (
+        "17 Jun  17 Jun  Previous balance  1,722.18" + "\n" +
+        "17 Jun  17 Jun  FAST Credit Payment  1,722.18 CR" + "\n" +
+        "19 Jun  19 Jun  FairPrice App  0.92" + "\n" +
+        "17 Jul  17 Jul  Total outstanding balance  115.82" + "\n"
+    )
+    got = rows.parse_page(table, ("2026-06-17", "2026-07-17"), 2026)
+    check("a dated balance row is not a transaction", len(got["transactions"]) == 2,
+          repr([t["description"] for t in got["transactions"]]))
+    check("it becomes the opening balance instead", got["opening_balance"] == "1722.18",
+          repr(got["opening_balance"]))
+
+    # ...but only when the label opens the line. A merchant may contain the word.
+    shop = rows.parse_page("19 Jun  19 Jun  BALANCE SPA TOTAL WELLNESS  40.00" + "\n",
+                           ("2026-06-17", "2026-07-17"), 2026)
+    check("a merchant containing 'balance' is still a transaction",
+          len(shop["transactions"]) == 1, repr(shop["transactions"]))
+
+
+    # A horizontal summary grid: figures in one row, labels stacked above and
+    # aligned by column. Nothing on the figures row says what any of it means.
+    # MariBank separates its headers with single spaces and stacks them over
+    # three lines; the (A)..(I) row is the only one that lines up cleanly.
+    mari = (
+        "        PREVIOUS  REPAYMENT/ WAIVER/ PURCHASE LOANS CASHBACK BANK SPLIT OTHERS" + "\n"
+        "        OUTSTANDING CONVERSION REFUND                    CHARGE PAYMENT" + "\n"
+        "        (A)       (B)      (C)   (D)     (E)      (F)    (G)    (H)    (I)" + "\n"
+        "        216.32    216.18   0.00  235.20  0.00     0.14   0.00   0.00   0.00" + "\n"
+        "        CURRENT OUTSTANDING (A-B-C+D+E-F+G+H+I)                  235.20" + "\n"
+    )
+    got = rows.parse_page(mari, ("2026-05-21", "2026-06-20"), 2026)
+    check("grid: opening balance found under stacked headers",
+          got["opening_balance"] == "216.32", repr(got["opening_balance"]))
+    check("grid: closing balance still read from its own line",
+          got["closing_balance"] == "235.20", repr(got["closing_balance"]))
+    # Lifting a component column into a total is the trap: MariBank's credits are
+    # repayment 216.18 plus cashback 0.14, so "REPAYMENT (B)" alone would FAIL a
+    # correct extraction by 14 cents.
+    check("grid: component columns are not read as totals",
+          got["total_credits"] is None and got["total_debits"] is None,
+          repr((got["total_debits"], got["total_credits"])))
+
+    # Trust writes the same grid as an equation on one line instead.
+    tr = (
+        "     Previous balance + Purchases + Cash advance + Interest/Fees - = Current outstanding balance" + "\n"
+        "      S$1,722.18 S$115.82 S$0.00   S$0.00   S$1,722.18  S$115.82" + "\n"
+    )
+    got = rows.parse_page(tr, ("2026-06-17", "2026-07-17"), 2026)
+    check("grid: operator-separated headers align too",
+          got["opening_balance"] == "1722.18", repr(got["opening_balance"]))
+
+    # Two numbers next to each other are a coincidence, not a grid.
+    pair = rows.parse_page("Previous balance   Interest" + "\n" + "   100.91  0.12" + "\n",
+                           ("2026-06-17", "2026-07-17"), 2026)
+    check("grid: needs at least three columns", pair["opening_balance"] is None,
+          repr(pair["opening_balance"]))
 
 
 def test_cli_runs() -> None:
@@ -204,7 +284,6 @@ def test_cli_runs() -> None:
     import subprocess
 
     env = {k: v for k, v in os.environ.items() if not k.startswith("SPIKE_")}
-    env.pop("ANTHROPIC_API_KEY", None)
 
     r = subprocess.run(
         [sys.executable, str(HERE / "extract.py"), "--dry-run"],
@@ -214,23 +293,14 @@ def test_cli_runs() -> None:
     check("--dry-run raises no traceback", "Traceback" not in r.stderr,
           r.stderr.strip()[-300:])
 
-    # No credentials and no provider: should be a clean message, not a crash.
+    # The real run must also survive with no arguments and no configuration.
     r2 = subprocess.run(
         [sys.executable, str(HERE / "extract.py")],
         capture_output=True, text=True, env=env,
     )
-    check("missing credentials fail cleanly", "Traceback" not in r2.stderr,
+    check("full run exits 0", r2.returncode == 0, r2.stderr.strip()[-300:])
+    check("full run raises no traceback", "Traceback" not in r2.stderr,
           r2.stderr.strip()[-300:])
-
-    # Bad mode should be rejected by name, not by stack trace.
-    r3 = subprocess.run(
-        [sys.executable, str(HERE / "extract.py")],
-        capture_output=True, text=True,
-        env={**env, "SPIKE_PROVIDER": "ollama", "SPIKE_MODEL": "x", "SPIKE_MODE": "bogus"},
-    )
-    check("invalid SPIKE_MODE rejected cleanly",
-          "Traceback" not in r3.stderr and "SPIKE_MODE" in r3.stderr,
-          r3.stderr.strip()[-300:])
 
 
 def test_reconciliation() -> None:
@@ -291,7 +361,7 @@ if __name__ == "__main__":
     test_no_call_site_bypasses_the_helpers()
     test_encryption_paths()
     test_row_detection()
-    test_page_rendering()
+    test_row_parsing()
     test_cli_runs()
     test_reconciliation()
     test_sanity_checks()

@@ -6,10 +6,22 @@ Nothing here is production code. Answer the question, throw it away, then build 
 
 All commands below are Windows PowerShell.
 
-## Run it on your machine, not in a cloud session
+## There is no model in this pipeline
 
-Statements are among the most sensitive documents you own. Keep them local.
-`spike/statements/`, `spike/out/`, and `passwords.json` are all gitignored — check that before you copy anything in.
+The spike originally sent each page to an LLM and asked it to find the transaction table. That was the wrong shape of problem. `pdfplumber.extract_text(layout=True)` already recovers the table — columns aligned, amounts on the right row — on every bank tested. Asking a model to "detect the table" was asking it to redo work that was already done, and it is precisely the step small local models fail at, silently, by returning an empty array.
+
+So the table is parsed in code, in [`rows.py`](rows.py). The consequences are worth stating plainly:
+
+- **Nothing leaves your machine.** Not "redacted before it leaves" — nothing leaves. No API key, no provider choice, no data terms to read.
+- **A whole statement parses in well under a second**, versus minutes per page against a local model on CPU.
+- **A wrong answer is a bug you can fix**, not a sampling artefact you can only re-roll. The same PDF always gives the same output.
+- **It costs nothing**, so there is no reason to economise on which statements you check.
+
+What this gives up is the ability to read a page with no text layer. A scanned statement is now reported and skipped; see [Scanned statements](#scanned-statements).
+
+## Setup
+
+Statements are among the most sensitive documents you own. `spike/statements/`, `spike/out/`, and `passwords.json` are all gitignored — check that before you copy anything in.
 
 ```powershell
 python -m venv .venv
@@ -23,17 +35,17 @@ If activation fails with *"running scripts is disabled on this system"*, PowerSh
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-## Step 1 — smoke-test (no real data, no network)
+## Step 1 — smoke-test (no real data)
 
 ```powershell
-python spike\selftest.py          # checks encoding + the reconciliation gate
+python spike\selftest.py          # encoding, parser, and the reconciliation gate
 python spike\make_sample.py       # writes a synthetic statement
-python spike\extract.py --dry-run
+python spike\extract.py
 ```
 
 Confirms the plumbing works before you point it at anything real. `selftest.py`
-needs no API key and touches no statements; run it first if anything misbehaves,
-since it isolates a broken environment from a bad parse.
+touches no statements; run it first if anything misbehaves, since it isolates a
+broken environment from a bad parse.
 
 ### A note on text encoding
 
@@ -48,23 +60,21 @@ Files we *don't* write — currently just `passwords.json` — are decoded
 tolerantly (UTF-8, UTF-8-with-BOM, then cp1252), so it doesn't matter which
 editor you used to create it. Notepad's BOM is handled.
 
-## Step 2 — text extraction on your statements (still no network)
-
-Drop 5–10 real PDFs into `spike\statements\`, then:
+## Step 2 — look at the extracted text
 
 ```powershell
 python spike\extract.py --dry-run
 ```
 
-This **sends nothing anywhere.** It writes each statement's extracted text to `spike\out\<name>.txt`. Open a few and check whether the transaction table survived — columns aligned, amounts on the right row, dates intact.
+Writes each statement's extracted text to `spike\out\<name>.txt` and stops. Open a few and check whether the transaction table survived — columns aligned, amounts on the right row, dates intact.
 
 ```powershell
 notepad spike\out\dbs.txt
 ```
 
-This step alone is worth doing carefully. If the text comes out scrambled or empty, no amount of LLM cleverness downstream will fix it, and you've learned that for free.
+This step is worth doing carefully. If the text comes out scrambled or empty, no parser can fix it downstream, and you've learned that immediately.
 
-The `rows` column counts lines that start with a date and end with an amount — a rough count of surviving transaction rows. `TABLE-OK` means the table structure made it through; `NO-TABLE` means inspect the `.txt` before spending any API calls on that bank.
+The `rows` column counts lines that start with a date and end with an amount. That count is deliberately computed by a *separate* regex from the real parser, so comparing the two numbers tells you whether the parser found everything the page actually contains — see the note under [What the result means](#what-the-result-means) for when a smaller number is legitimate. `TABLE-OK` means the table structure made it through; `NO-TABLE` means inspect the `.txt`.
 
 ### Encrypted statements
 
@@ -78,238 +88,40 @@ If a statement is genuinely locked, create `spike\passwords.json`:
 { "uob-jun-2026.pdf": "S1234567A", "ocbc-jun-2026.pdf": "0512" }
 ```
 
-## Step 3 — full pipeline
-
-Per page: text → model → structured JSON → merged → **reconciled against the statement's own printed totals.**
-
-Card numbers are masked to last-4 before any text leaves the machine (`redact()` in `extract.py`). If you use a hosted provider, the rest of the page — merchants, amounts, dates — does go to that API. That's the tradeoff this step is testing. Running locally (below) avoids it entirely.
-
-### Option A — local, free, nothing leaves your machine
-
-The best fit for financial data, and the one to try first on a 32GB Windows box:
+## Step 3 — parse and reconcile
 
 ```powershell
-ollama pull qwen3.6:35b-a3b
-
-$env:SPIKE_PROVIDER = "ollama"
-$env:SPIKE_MODEL    = "qwen3.6:35b-a3b"
 python spike\extract.py
 ```
 
-Uses Ollama's native `/api/chat` with its `format` parameter, which constrains
-token *generation* to the schema — malformed JSON becomes mechanically
-impossible rather than merely discouraged.
+Per page: text → parsed rows → merged → **reconciled against the statement's own printed totals.** Writes `spike\out\<name>.json`.
 
-⚠️ Ollama does **not** accept OpenAI's `response_format: {type: "json_schema"}`
-on its `/v1` endpoint, so don't try to reach it with `SPIKE_PROVIDER=openai`.
-You'd get unconstrained output and conclude local models can't do this.
+Card numbers are masked to last-4 on the way in (`redact()` in `extract.py`), so the `.txt` and `.json` dumps are safe to paste into a bug report.
 
-**Prove the pipeline on a small model first.** A 20GB model on a 32GB machine
-is the worst thing to debug against — you can't tell a wrong setting from slow
-inference. Get a green run on something fast, then scale up:
+## How the parser works
 
-```powershell
-ollama pull qwen3.5:9b
-$env:SPIKE_MODEL = "qwen3.5:9b"
-python spike\extract.py --file spike\statements\sample-statement.pdf
-```
+[`rows.py`](rows.py) does five things:
 
-That's ~6GB and one synthetic page. If it reconciles, the plumbing is right and
-any later failure is about model capability.
-
-#### Thinking is off by default, deliberately
-
-Ollama 0.12+ auto-enables thinking on thinking-capable models, and Qwen 3.x is
-one. For schema-constrained extraction that is pure cost: the model writes a
-long reasoning trace before emitting JSON it was going to be forced into
-anyway. Minutes per page instead of seconds.
-
-The harness sends `think: false`. To measure the difference yourself:
-
-```powershell
-$env:SPIKE_THINK = "true"
-```
-
-(Older Ollama builds don't know the field; the harness detects the rejection
-and retries without it rather than failing the run.)
-
-#### Timeouts and context
-
-| Variable | Default | Raise it when |
-|---|---|---|
-| `SPIKE_TIMEOUT` | 1800 (30 min per page) | The model is genuinely slow rather than stuck |
-| `SPIKE_NUM_CTX` | 16384 | Statement pages are long |
-
-`SPIKE_NUM_CTX` matters more than it looks. Ollama's own default is much
-smaller, and it drops overflow from the *front* of the prompt silently — which
-looks identical to the model missing transactions rather than a config problem.
-
-```powershell
-$env:SPIKE_TIMEOUT = "3600"
-$env:SPIKE_NUM_CTX = "32768"
-```
-
-If a page times out, check whether it's swapping before raising anything —
-`ollama ps` shows resident size. If that's near your free RAM, the answer is a
-smaller model, not a longer timeout.
-
-#### Vision models: reading the page instead of its text
-
-`qwen3-vl` reads the rendered page as a picture rather than a text dump. Set
-`SPIKE_MODE`:
-
-| Mode | What it sends | Use when |
-|---|---|---|
-| `text` (default) | Extracted text | The PDF has a text layer. Cheapest and usually most accurate — the characters are exact, not inferred. |
-| `auto` | Text where there's a text layer, image where there isn't | **The one to run.** Scanned statements stop being a dead end. |
-| `image` | Always the page image | Comparing against `text` on the same statements, or when text extraction mangles a bank's layout. |
-
-```powershell
-$env:SPIKE_PROVIDER = "ollama"
-$env:SPIKE_MODEL    = "qwen3-vl:8b"
-$env:SPIKE_MODE     = "auto"
-python spike\extract.py
-```
-
-This closes a gap the design listed as unsolved: pages with no text layer were
-previously reported and skipped. Under `auto` they're rendered at ~1200×1700
-and read directly, so the OCR fallback in `DESIGN.md` §2.1 is now real rather
-than planned.
-
-Two things to know:
-
-- **Image mode is slower per page.** Image tokens are not free, and an 8B model
-  on CPU processes them slowly. Expect minutes, not seconds. The per-page timer
-  tells you where you stand.
-- **Redaction does not apply to pixels.** `redact()` masks card numbers in
-  extracted *text*; it can't touch a rendered image. That's fine locally, where
-  nothing leaves the machine — the harness refuses image mode on any non-Ollama
-  backend for exactly this reason.
-
-`SPIKE_IMAGE_SCALE` (default 2.0) trades resolution for speed. Drop to 1.5 if
-pages are slow; raise it if small print is being misread.
-
-#### Picking a local model (32GB RAM)
-
-Qwen 3.5's GGUFs currently don't load in Ollama (they ship separate `mmproj`
-vision files). **Qwen 3.6 is in the official Ollama library and is the one to
-use**; 3.5 needs llama.cpp directly.
-
-| Model | Size at Q4_K_M | Notes |
-|---|---|---|
-| `qwen3.6:35b-a3b` | ~20 GB | **Start here.** Mixture-of-experts, only ~3B parameters active per token, so it's far faster than its size suggests — the difference between usable and unusable on CPU. |
-| `qwen3.6:27b` | ~16 GB | Dense. Fits with more headroom but every parameter runs on every token, so it's slower despite being smaller. |
-| `qwen3.5:9b` | ~6 GB | Fallback if the above thrash. Expect weaker adherence on a strict schema. |
-| `qwen3-vl:8b` | ~6 GB | **Vision.** The only one here that can read a scanned statement. Strong on document and table extraction for its size. Pair with `SPIKE_MODE=auto`. |
-
-Q5_K_M or higher is generally better for structured extraction, but 35B at Q5
-is ~25GB — tight on a 32GB machine with Windows and a browser running. Start at
-Q4_K_M and only move up if reconciliation is marginal.
-
-Check what's actually loaded and how much RAM it's using:
-
-```powershell
-ollama list
-ollama ps
-```
-
-### Option B — Anthropic (the accuracy baseline)
-
-```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
-python spike\extract.py
-```
-
-`$env:` lasts only for the current PowerShell window. To persist it for your user account:
-
-```powershell
-[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-...", "User")
-```
-
-Reopen PowerShell afterwards for it to take effect. Don't put the key in a file inside the repo.
-
-**Getting a key:** console.anthropic.com → Settings → API Keys → Create Key. The API is **billed separately from a Claude Pro/Max subscription** — a subscription includes no API credits, which is the most common surprise. Add a payment method and buy credits before the first run.
-
-### Option C — hosted, free or cheap
-
-```powershell
-$env:SPIKE_PROVIDER = "openai"
-$env:SPIKE_BASE_URL = "https://api.groq.com/openai/v1"
-$env:SPIKE_API_KEY  = "gsk_..."
-$env:SPIKE_MODEL    = "llama-3.3-70b-versatile"
-python spike\extract.py
-```
-
-```powershell
-$env:SPIKE_PROVIDER = "openai"
-$env:SPIKE_BASE_URL = "https://openrouter.ai/api/v1"
-$env:SPIKE_API_KEY  = "sk-or-..."
-$env:SPIKE_MODEL    = "deepseek/deepseek-r1:free"
-python spike\extract.py
-```
-
-⚠️ **Read the data terms before pointing a free tier at real statements.** Free tiers are frequently free because inputs are retained or used for training. That is a bad trade for a document listing everywhere you spend money. Local, or a paid tier with no-training terms, is the safer default here.
-
-Cheapest paid: DeepSeek and Gemini Flash-Lite land near $0.10–0.30 per million input tokens, roughly 20–50× below Opus 5.
-
-### Switching back, and clearing variables
-
-Environment variables persist for the life of the window, so a leftover
-`SPIKE_PROVIDER` will silently send the next run somewhere you didn't intend.
-Clear them when switching:
-
-```powershell
-Remove-Item Env:SPIKE_PROVIDER, Env:SPIKE_MODEL, Env:SPIKE_BASE_URL, Env:SPIKE_API_KEY -ErrorAction SilentlyContinue
-```
-
-The run prints which model and endpoint it used on the first line — check it matches what you meant.
-
-### Provider settings reference
-
-| Variable | Meaning |
-|---|---|
-| `SPIKE_PROVIDER` | `anthropic` (default) \| `ollama` \| `openai` |
-| `SPIKE_MODEL` | model id |
-| `SPIKE_BASE_URL` | endpoint (required for `openai`; defaults to `http://localhost:11434` for `ollama`) |
-| `SPIKE_API_KEY` | key for the `openai` backend |
-| `SPIKE_NUM_CTX` | Ollama context window, default 16384 |
-| `SPIKE_TIMEOUT` | Ollama per-page timeout in seconds, default 1800 |
-| `SPIKE_THINK` | `true` to allow thinking on Ollama (default off) |
-| `SPIKE_MODE` | `text` (default) \| `image` \| `auto` — send page images to a vision model |
-| `SPIKE_IMAGE_SCALE` | render scale for image mode, default 2.0 |
-
-The reconciliation gate is identical across providers, so "is the cheap model good enough?" stops being a guess. Run the same statements through each and compare PASS counts.
-
-### What Anthropic costs, if you use it
-
-Runs on `claude-opus-5` by default. For 5 statements at ~4 pages each, expect **well under $2** for the whole spike — roughly 3K input / 1.5K output tokens per page at Opus 5's $5/$25 per million:
-
-| Model | Per page | 20 pages |
-|---|---|---|
-| `claude-opus-5` (default) | ~$0.05 | ~$1.05 |
-| `claude-sonnet-5` | ~$0.02 | ~$0.42 |
-
-Run the default first. The spike is asking *whether extraction is possible at all*, so a failure should mean the approach is hard — not that you economized on the model. Once it passes:
-
-```powershell
-$env:SPIKE_MODEL = "claude-sonnet-5"
-python spike\extract.py
-```
+1. **Peels dates off the front of a line.** Up to two — a transaction date and a posting date. An inline year must be four digits, because a two-digit year is indistinguishable from the day of the *next* date, and `27 JUN 28 JUN` silently losing its second date halves every issuer that prints both.
+2. **Takes the amount off the end**, along with however the issuer signals direction: a trailing `CR`/`DR`, a leading `+`/`-`, or accounting parentheses. Absent any of those it assumes a debit, which reconciliation contradicts loudly if it's wrong.
+3. **Resolves the year once per document**, not per page. Only page 1 tends to print the statement period or any four-digit year; continuation pages carry bare `12 JUN` rows. Resolving per page throws away every transaction after page one and looks exactly like a quiet month — the worst failure mode available, because nothing reports it.
+4. **Reads the summary figures** — previous balance, new balance, printed totals — from a deliberately narrow label list. When a label isn't clearly recognised the field stays empty and the statement is reported `UNVERIFIED`. A loose match that puts the wrong figure in `total_debits` doesn't produce an obvious error; it produces a confident `FAIL` on a correct extraction, or a `PASS` on a wrong one.
+5. **Reads horizontal summary grids**, where the figures sit in one row and the labels are stacked above them, aligned by column — MariBank and Trust both do this, and nothing on the figures row says what any of it means. Only the opening and closing balance are taken. The component columns look useful and are a trap: MariBank splits what the transaction table calls a credit across two of them (repayment 216.18, cashback 0.14), so lifting one into `total_credits` would FAIL a perfectly correct extraction by 14 cents. This pass runs last and never overwrites a directly labelled line, so a grid can only add what nothing else said.
 
 ## Reading the output
 
 ```
-statement              pages  rows  verdict     detail
-dbs-jun-2026.pdf           4    47  PASS        matches printed totals
-ocbc-jun-2026.pdf          3    31  PASS        balance rolls forward (card convention)
-citi-jun-2026.pdf          6    52  FAIL        debits off by 412.00
-amex-jun-2026.pdf          2     0  ERROR       encrypted (supplied password rejected)
-uob-scan.pdf               5     0  UNVERIFIED  statement prints no totals to check against
-                                 !  5/5 page(s) have no text layer — needs OCR
+statement               pages  rows  verdict     detail
+dbs.pdf                     4    45  PASS        balance rolls forward (card convention)
+maribank.pdf                5    18  PASS        balance rolls forward (card convention)
+sample-statement.pdf        1    15  PASS        matches printed totals
+uob.pdf                     8    89  PASS        balance rolls forward (card convention)
+                               !  1 identical row(s) within one statement (page double-read?)
+
+6/6 verifiable statements reconciled.
 ```
 
-In `--dry-run` the verdict is `TABLE-OK` or `NO-TABLE` instead, since nothing
-has been parsed yet.
+In `--dry-run` the verdict is `TABLE-OK` or `NO-TABLE` instead, since nothing has been parsed yet.
 
 | Verdict | Meaning |
 |---|---|
@@ -321,22 +133,14 @@ has been parsed yet.
 ## What the result means
 
 - **Most statements PASS** → the design in `../DESIGN.md` holds. Go to Phase 1.
-- **Systematic FAILs at one bank** → look at that bank's `out\*.txt`. Usually a layout the text extractor mangles, or a section (fees, FX sublines, instalments) not being counted. Cheap to fix.
-- **FAILs scattered everywhere** → the LLM-first approach is too loose. Fall back to per-bank template parsers, and expect real work per bank.
-- **Mostly `UNVERIFIED`** → the trust gate can't function. This is the worst outcome, because it means you can never distinguish a good parse from a bad one automatically. Revisit before building further.
+- **Systematic FAILs at one bank** → look at that bank's `out\*.txt`, then at the label list in `rows.py`. Usually a section (fees, FX sublines, instalments) not being counted, or a summary label spelled differently.
+- **Row count below the `--dry-run` count** → worth a look, but not automatically a defect. Some issuers rule their opening and closing balance into the transaction table as dated rows; those are claimed as summary figures and dropped, so Trust legitimately parses 7 of its 9 date-and-amount lines. A gap larger than two or three is the single most useful signal here.
+- **Mostly `UNVERIFIED`** → the trust gate can't function. This is the worst outcome, because you can never distinguish a good parse from a bad one automatically. Revisit before building further.
 
 Record the verdict table in the PR or an issue. It's the input to every Phase 1 decision.
 
-## Comparing providers
+## Scanned statements
 
-Because the reconciliation gate is the same everywhere, provider choice becomes
-a measurement rather than a guess. Run the same statements through each and
-compare:
+A page with no text layer has nothing to parse. It is counted, warned about, and skipped — never silently treated as a page with no transactions.
 
-```
-statement      opus-5    qwen3.6:35b-a3b
-dbs.pdf        PASS      PASS      <- local is good enough, use it
-uob.pdf        PASS      FAIL      <- this bank needs the better model
-```
-
-If local passes everywhere, you're done and it costs nothing from here on.
+Reading one needs OCR. If you hit this, the options in rough order of effort are Tesseract via `pytesseract`, or a small local vision model (`glm-ocr` is ~2.2GB and purpose-built for document layout) used *only* to turn the page into text, with `rows.py` still doing the parsing. Don't reintroduce a model that emits the final JSON — that's the arrangement this spike removed.

@@ -6,36 +6,21 @@ question this answers is: does extraction reconcile against the statement's
 own printed totals, and on which banks does it fail?
 
 Usage:
-    python extract.py --dry-run          # text extraction only, no network
-    python extract.py                    # full pipeline (needs ANTHROPIC_API_KEY)
+    python extract.py --dry-run          # dump the extracted text and stop
+    python extract.py                    # parse, reconcile, report
     python extract.py --file foo.pdf     # just one
 
-Provider is selected by environment:
-    SPIKE_PROVIDER   anthropic (default) | ollama | openai
-    SPIKE_MODEL      model id (default claude-opus-5)
-    SPIKE_BASE_URL   endpoint; required for openai, defaults to
-                     http://localhost:11434 for ollama
-    SPIKE_API_KEY    key for the openai backend
-    SPIKE_NUM_CTX    ollama context window (default 16384)
-    SPIKE_TIMEOUT    ollama per-page timeout in seconds (default 1800)
-    SPIKE_THINK      set true to allow thinking on ollama (default off: for
-                     schema-constrained extraction it only costs time)
-    SPIKE_MODE       text (default) | image | auto — send page images to a
-                     vision model. auto uses images only for scanned pages.
-    SPIKE_IMAGE_SCALE  render scale for image mode (default 2.0)
-
-The reconciliation gate is the same either way, so provider choice is a
-measurable question: run the same statements through each, compare PASS counts.
+Everything runs offline. There is no model and no network call: the table is
+already laid out correctly by pdfplumber, so it is parsed in code by rows.py.
+See that module for why, and README.md for what this replaced.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
-import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -43,16 +28,12 @@ from pathlib import Path
 import pdfplumber
 import pypdf
 
+import rows
+
 HERE = Path(__file__).parent
 STATEMENTS = HERE / "statements"
 OUT = HERE / "out"
 
-# Opus 5 by default: the spike is measuring whether extraction is *possible*,
-# so run it at full strength. The whole run costs about a dollar either way.
-# Once it passes, re-run with MODEL=claude-sonnet-5 to see if the cheaper model
-# holds up — that's the number that matters for production, not for this.
-MODEL = os.environ.get("SPIKE_MODEL", "claude-opus-5")
-MAX_TOKENS = 16000                # thinking + JSON share this budget on Opus 5
 TOLERANCE = Decimal("0.01")       # a cent of rounding slack
 SCAN_CHAR_THRESHOLD = 100         # below this, the page is almost certainly an image
 DATE_SLACK_DAYS = 5               # posting lag outside the statement period
@@ -91,8 +72,8 @@ def read_text(path: Path) -> str:
 # ---------------------------------------------------------------- redaction
 
 # A transaction row, heuristically: starts with a date, ends with an amount.
-# Only used to judge whether the table survived text extraction — the real
-# parsing is done by the model.
+# Deliberately independent of rows.py — it is the check that the real parser
+# found everything the page actually contains, so it must not share its code.
 TXN_DATE = re.compile(
     r"^\s*(?:"
     r"\d{1,2}[ /-](?:\d{1,2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:[ /-]\d{2,4})?"
@@ -132,40 +113,14 @@ class Page:
     number: int
     text: str
     char_count: int
-    image_b64: str | None = None   # populated only when the mode needs it
 
     @property
     def looks_scanned(self) -> bool:
         return self.char_count < SCAN_CHAR_THRESHOLD
 
 
-def render_page_png(path: Path, index: int, scale: float) -> str:
-    """Render one page to a base64 PNG for a vision model.
-
-    scale 2.0 puts a statement page around 1200x1700, which is enough for
-    small print without ballooning the image-token count.
-    """
-    import io, base64
-    import pypdfium2 as pdfium
-
-    pdf = pdfium.PdfDocument(str(path))
-    try:
-        img = pdf[index].render(scale=scale).to_pil().convert("RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=True)
-        return base64.b64encode(buf.getvalue()).decode()
-    finally:
-        pdf.close()
-
-
-def read_pdf(path: Path, password: str | None, mode: str = "text") -> tuple[list[Page], str | None]:
-    """Return (pages, error). Decrypts first if needed.
-
-    mode controls whether page images are rendered for a vision model:
-      text  — never (default)
-      image — always; the model reads the page as a picture
-      auto  — only for pages with no text layer, i.e. scans
-    """
+def read_pdf(path: Path, password: str | None) -> tuple[list[Page], str | None]:
+    """Return (pages, error). Decrypts first if needed."""
     source = path
 
     reader = pypdf.PdfReader(str(path))
@@ -198,285 +153,10 @@ def read_pdf(path: Path, password: str | None, mode: str = "text") -> tuple[list
             raw = page.extract_text(layout=True) or ""
             pages.append(Page(number=i, text=redact(raw), char_count=len(raw.strip())))
 
-    if mode in ("image", "auto"):
-        scale = float(os.environ.get("SPIKE_IMAGE_SCALE", "2.0"))
-        for i, p in enumerate(pages):
-            if mode == "image" or p.looks_scanned:
-                p.image_b64 = render_page_png(source, i, scale)
-                # Send the picture alone rather than the picture plus a text
-                # transcript of it — two versions of the same page invites the
-                # model to reconcile them instead of reading one.
-                if mode == "image":
-                    p.text = ""
-
     if source != path:
         source.unlink(missing_ok=True)
 
     return pages, None
-
-
-# ------------------------------------------------------------ text -> json
-
-SYSTEM = """You extract transactions from bank and credit card statements.
-
-Rules:
-- Extract ONLY rows from the transaction table. Ignore marketing text, rewards
-  promos, legal fine print, and page headers/footers.
-- A row that is a card payment, direct debit of the card balance, or balance
-  transfer IS still a transaction — extract it, and mark direction correctly.
-- Do not invent transactions. If a row is cut off at a page boundary, extract
-  what is visible; the caller stitches pages.
-- Amounts: positive decimal strings, no currency symbols or thousands
-  separators. Use `direction` to convey sign.
-- Dates: ISO YYYY-MM-DD. Infer the year from the statement period when the row
-  shows only day and month. Statements spanning a year boundary are common —
-  a December row on a statement ending in January belongs to the earlier year.
-- Summary figures (opening/closing balance, totals): report them ONLY if they
-  are printed on THIS page. Never compute or estimate them. Null if absent.
-"""
-
-TOOL = {
-    "name": "record_page",
-    "description": "Record structured data extracted from one statement page.",
-    # strict mode guarantees the input validates against this schema exactly,
-    # so a malformed extraction fails loudly at the API instead of quietly
-    # producing a half-parsed statement. Requires every property listed in
-    # `required` and additionalProperties false — optional fields are nullable.
-    "strict": True,
-    "input_schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "issuer": {"type": ["string", "null"], "description": "Bank/issuer name if printed on this page"},
-            "account_last4": {"type": ["string", "null"]},
-            "statement_period_start": {"type": ["string", "null"], "description": "ISO date"},
-            "statement_period_end": {"type": ["string", "null"], "description": "ISO date"},
-            "currency": {"type": ["string", "null"], "description": "ISO 4217, e.g. SGD"},
-            "opening_balance": {"type": ["string", "null"], "description": "Decimal string, only if printed on this page"},
-            "closing_balance": {"type": ["string", "null"]},
-            "total_debits": {"type": ["string", "null"], "description": "Total charges/purchases/withdrawals, if printed"},
-            "total_credits": {"type": ["string", "null"], "description": "Total payments/refunds/deposits, if printed"},
-            "transactions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "date": {"type": "string", "description": "ISO transaction date"},
-                        "posted_date": {"type": ["string", "null"]},
-                        "description": {"type": "string", "description": "Verbatim merchant text"},
-                        "amount": {"type": "string", "description": "Positive decimal string"},
-                        "direction": {"type": "string", "enum": ["debit", "credit"]},
-                    },
-                    "required": ["date", "posted_date", "description", "amount", "direction"],
-                },
-            },
-        },
-        "required": [
-            "issuer", "account_last4", "statement_period_start", "statement_period_end",
-            "currency", "opening_balance", "closing_balance", "total_debits",
-            "total_credits", "transactions",
-        ],
-    },
-}
-
-
-def user_prompt(page: Page, hint: str) -> str:
-    if page.image_b64 and not page.text:
-        return (
-            f"Statement page {page.number}.{hint}\n\n"
-            f"Read the attached page image and extract its transaction table."
-        )
-    return f"Statement page {page.number}.{hint}\n\n<page>\n{page.text}\n</page>"
-
-
-def extract_page_anthropic(client, page: Page, hint: str) -> dict:
-    msg = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
-        tools=[TOOL],
-        tool_choice={"type": "tool", "name": "record_page"},
-        messages=[{"role": "user", "content": user_prompt(page, hint)}],
-    )
-    for block in msg.content:
-        if block.type == "tool_use":
-            return block.input
-    return {"transactions": []}
-
-
-def extract_page_openai_compatible(client, page: Page, hint: str) -> dict:
-    """Any provider speaking the OpenAI chat-completions API.
-
-    Covers Ollama (local), Groq, DeepSeek, OpenRouter, Together, and Gemini's
-    compatibility endpoint. Uses JSON-schema response format rather than tool
-    use — more widely supported across these providers, same guarantee.
-    """
-    resp = client.chat.completions.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "record_page",
-                "strict": True,
-                "schema": TOOL["input_schema"],
-            },
-        },
-        messages=[
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user_prompt(page, hint)},
-        ],
-    )
-    return parse_json_loosely(resp.choices[0].message.content or "")
-
-
-def parse_json_loosely(raw: str) -> dict:
-    """Smaller and local models often wrap JSON in prose or a ``` fence."""
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-    start, end = raw.find("{"), raw.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(raw[start:end + 1])
-        except json.JSONDecodeError:
-            pass
-    return {"transactions": []}
-
-
-class OllamaClient:
-    """Ollama's native /api/chat.
-
-    Ollama does NOT accept OpenAI's `response_format: {type: "json_schema"}` on
-    its /v1 compatibility endpoint — it takes the schema in its own top-level
-    `format` field on /api/chat instead. Sending the OpenAI shape gets you
-    unconstrained prose that happens to look like JSON, or nothing.
-
-    Worth using the native path anyway: `format` constrains token *generation*
-    to the schema, so malformed JSON is mechanically impossible rather than
-    merely discouraged.
-    """
-
-    def __init__(self, base_url: str):
-        import httpx
-        self.url = base_url.rstrip("/").removesuffix("/v1") + "/api/chat"
-        # Cold-loading a 20GB model into RAM takes a while on the first call,
-        # and CPU-only generation is slow. Generous, but bounded.
-        timeout = float(os.environ.get("SPIKE_TIMEOUT", "1800"))
-        self.http = httpx.Client(timeout=httpx.Timeout(timeout, connect=10.0))
-        self.timeout = timeout
-        # Ollama 0.12+ auto-enables thinking on thinking-capable models. For
-        # schema-constrained extraction that's pure cost: the model writes a
-        # long reasoning trace before emitting JSON it was going to be forced
-        # into anyway. Off unless explicitly asked for.
-        self.think = os.environ.get("SPIKE_THINK", "").lower() in ("1", "true", "yes")
-        self._send_think = True   # cleared if this server/model rejects the field
-
-    def chat(self, system: str, user: str, schema: dict, image_b64: str | None = None) -> str:
-        import httpx
-        try:
-            return self._post(system, user, schema, image_b64)
-        except httpx.ConnectError:
-            raise SystemExit(
-                f"Can't reach Ollama at {self.url}.\n"
-                f"Start it (`ollama serve`, or launch the Ollama app) and retry."
-            ) from None
-        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
-            raise SystemExit(
-                f"Ollama did not respond within {self.timeout:.0f}s on one page.\n"
-                f"\n"
-                f"{MODEL} is likely too slow on this machine, or is swapping to disk.\n"
-                f"In rough order of what to try:\n"
-                f"  1. Prove the pipeline with a small model first:\n"
-                f"       ollama pull qwen3.5:9b\n"
-                f"       $env:SPIKE_MODEL = \"qwen3.5:9b\"\n"
-                f"  2. Check it isn't swapping — `ollama ps` shows resident size.\n"
-                f"     If that approaches your free RAM, use a smaller model.\n"
-                f"  3. Raise the ceiling if it's merely slow, not stuck:\n"
-                f"       $env:SPIKE_TIMEOUT = \"3600\"\n"
-            ) from None
-        except httpx.HTTPStatusError as e:
-            hint = ""
-            if e.response.status_code == 404:
-                hint = f"\nIs the model pulled?  ollama pull {MODEL}"
-            raise SystemExit(f"Ollama returned {e.response.status_code}.{hint}") from None
-
-    def _post(self, system: str, user: str, schema: dict, image_b64: str | None = None) -> str:
-        import httpx
-        message = {"role": "user", "content": user}
-        if image_b64:
-            message["images"] = [image_b64]
-        payload = {
-            "model": MODEL,
-            "messages": [
-                {"role": "system", "content": system},
-                message,
-            ],
-            "format": schema,
-            "stream": False,
-            "keep_alive": "10m",   # don't re-load the model between pages
-            "options": {
-                "temperature": 0,
-                # Ollama defaults to a small context (often 4096). A statement
-                # page plus the system prompt and schema overruns that, and the
-                # overflow is silently dropped from the front — which looks
-                # exactly like the model missing transactions.
-                "num_ctx": int(os.environ.get("SPIKE_NUM_CTX", "16384")),
-            },
-        }
-        if self._send_think:
-            payload["think"] = self.think
-
-        r = self.http.post(self.url, json=payload)
-        # Older Ollama builds don't know the `think` field. Drop it and retry
-        # rather than failing the run over an optimisation.
-        if r.status_code == 400 and self._send_think:
-            self._send_think = False
-            payload.pop("think")
-            r = self.http.post(self.url, json=payload)
-
-        r.raise_for_status()
-        return r.json().get("message", {}).get("content", "")
-
-
-def extract_page_ollama(client: OllamaClient, page: Page, hint: str) -> dict:
-    raw = client.chat(SYSTEM, user_prompt(page, hint), TOOL["input_schema"], page.image_b64)
-    return parse_json_loosely(raw)
-
-
-def build_client():
-    """Pick a backend from SPIKE_PROVIDER: anthropic (default) | ollama | openai.
-
-    The reconciliation gate is identical across all three, so provider choice
-    becomes a measurable question — run the same statements through each and
-    compare PASS counts, rather than guessing which model is good enough.
-    """
-    provider = os.environ.get("SPIKE_PROVIDER", "anthropic").lower()
-
-    if provider == "ollama":
-        base = os.environ.get("SPIKE_BASE_URL", "http://localhost:11434")
-        return OllamaClient(base), extract_page_ollama
-
-    if provider == "openai":
-        base_url = os.environ.get("SPIKE_BASE_URL")
-        if not base_url:
-            raise SystemExit("SPIKE_PROVIDER=openai needs SPIKE_BASE_URL set.")
-        import openai
-        key = os.environ.get("SPIKE_API_KEY") or "not-needed"
-        return openai.OpenAI(base_url=base_url, api_key=key), extract_page_openai_compatible
-
-    if provider != "anthropic":
-        raise SystemExit(f"Unknown SPIKE_PROVIDER={provider!r} (anthropic | ollama | openai)")
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit(
-            "Set ANTHROPIC_API_KEY, or pick another provider with SPIKE_PROVIDER.\n"
-            "See spike/README.md for provider settings."
-        )
-    import anthropic
-    return anthropic.Anthropic(), extract_page_anthropic
 
 
 # -------------------------------------------------------------- reconcile
@@ -587,10 +267,10 @@ def merge(pages: list[dict]) -> dict:
     return out
 
 
-def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn, mode: str = "text") -> Result:
+def process(path: Path, passwords: dict, dry_run: bool) -> Result:
     r = Result(name=path.name)
 
-    pages, err = read_pdf(path, passwords.get(path.name), mode if not dry_run else "text")
+    pages, err = read_pdf(path, passwords.get(path.name))
     if err:
         r.verdict = "ERROR"
         r.detail = err
@@ -599,12 +279,12 @@ def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn, mode
     r.pages = len(pages)
     r.scanned_pages = sum(1 for p in pages if p.looks_scanned)
     if r.scanned_pages:
-        if any(p.looks_scanned and p.image_b64 for p in pages):
-            r.warnings.append(f"{r.scanned_pages}/{r.pages} page(s) have no text layer — read as images")
-        else:
-            r.warnings.append(
-                f"{r.scanned_pages}/{r.pages} page(s) have no text layer — "
-                f"skipped (set SPIKE_MODE=auto with a vision model to read them)")
+        # Parsing text can't reach a page that has none. Reported rather than
+        # silently skipped, because otherwise a scan looks like a statement
+        # with no transactions — the one failure that would fool the gate.
+        r.warnings.append(
+            f"{r.scanned_pages}/{r.pages} page(s) have no text layer — "
+            f"skipped (a scan needs OCR before this can read it)")
 
     if dry_run:
         dump = OUT / f"{path.stem}.txt"
@@ -615,30 +295,26 @@ def process(path: Path, passwords: dict, dry_run: bool, client, extract_fn, mode
             r.detail = f"{r.txns} transaction-shaped rows survived — see {dump.name}"
         else:
             r.verdict = "NO-TABLE"
-            r.detail = f"no date+amount rows found — inspect {dump.name} before spending API calls"
+            r.detail = f"no date+amount rows found — inspect {dump.name}"
         return r
 
-    hint = ""
-    extracted = []
-    for p in pages:
-        # A scanned page has nothing to send unless we rendered it.
-        if p.looks_scanned and not p.image_b64:
-            continue
-        # A local model can sit on one page for minutes. Without this, a slow
-        # run and a hung one look identical and you can't tell which you have.
-        print(f"  {path.name} page {p.number}/{len(pages)} ...", end="", flush=True)
-        started = time.monotonic()
-        page_data = extract_fn(client, p, hint)
-        elapsed = time.monotonic() - started
-        print(f" {len(page_data.get('transactions', [])):>3} txns  {elapsed:6.1f}s")
-        extracted.append(page_data)
-        # Carry the period forward so later pages can resolve bare day/month dates.
-        if not hint:
-            s, e = page_data.get("statement_period_start"), page_data.get("statement_period_end")
-            if s and e:
-                hint = f" Statement period is {s} to {e}."
+    # One pass over the whole document first: the statement period and the year
+    # are almost always printed only on page 1, and every later page needs them
+    # to date a bare "12 JUN" row.
+    (period_start, period_end), doc_year = rows.document_context([p.text for p in pages])
+
+    extracted = [
+        rows.parse_page(p.text, (period_start, period_end), doc_year)
+        for p in pages if not p.looks_scanned
+    ]
 
     stmt = merge(extracted)
+    ambiguous = sum(p.pop("_ambiguous_rows", 0) for p in extracted)
+    if ambiguous:
+        r.warnings.append(
+            f"{ambiguous} row(s) carried more than one amount — a running-balance "
+            f"column may have been read as the transaction amount")
+
     r.txns = len(stmt["transactions"])
     r.data = stmt
     reconcile(stmt, r)
@@ -675,37 +351,10 @@ def main() -> int:
         print(f"No PDFs in {STATEMENTS}/ — drop statements there and re-run.")
         return 1
 
-    client, extract_fn, mode = None, None, "text"
     if not args.dry_run:
-        client, extract_fn = build_client()
-        provider = os.environ.get("SPIKE_PROVIDER", "anthropic").lower()
-        where = {
-            "ollama": os.environ.get("SPIKE_BASE_URL", "http://localhost:11434"),
-            "openai": os.environ.get("SPIKE_BASE_URL", "?"),
-        }.get(provider, "api.anthropic.com")
+        print("Parsing locally — no model, no network.")
 
-        # Easy mistake: set SPIKE_PROVIDER but forget SPIKE_MODEL, and the
-        # Claude default gets sent to Ollama, which fails with a confusing
-        # "model not found" rather than telling you what actually went wrong.
-        if provider != "anthropic" and MODEL.startswith("claude-"):
-            raise SystemExit(
-                f"SPIKE_PROVIDER={provider} but SPIKE_MODEL is still {MODEL!r}.\n"
-                f"Set SPIKE_MODEL to a model that provider serves."
-            )
-
-        mode = os.environ.get("SPIKE_MODE", "text").lower()
-        if mode not in ("text", "image", "auto"):
-            raise SystemExit(f"Unknown SPIKE_MODE={mode!r} (text | image | auto)")
-        if mode != "text" and provider != "ollama":
-            raise SystemExit(
-                f"SPIKE_MODE={mode} sends page images, which only the ollama "
-                f"backend supports here.\n"
-                f"Note images cannot be redacted the way text is — the card "
-                f"number stays visible in the pixels, so keep image mode local."
-            )
-        print(f"Extracting with {MODEL} via {provider} @ {where}  [mode={mode}]")
-
-    results = [process(f, passwords, args.dry_run, client, extract_fn, mode) for f in files]
+    results = [process(f, passwords, args.dry_run) for f in files]
 
     width = max(len(r.name) for r in results)
     print(f"\n{'statement'.ljust(width)}  {'pages':>5} {'rows':>5}  verdict     detail")
