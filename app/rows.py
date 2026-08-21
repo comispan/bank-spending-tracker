@@ -60,6 +60,26 @@ AMOUNT_TAIL = re.compile(
 )
 ANY_AMOUNT = re.compile(r"\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2}")
 
+# The issuer's own reference for a single transaction. Two shapes in the corpus,
+# and they need different handling:
+#   UOB and DBS put it on a continuation line under the row
+#       Ref No. : 74143256188100091281157
+#   Standard Chartered writes it inline, inside the description
+#       BUS/MRT 901852743 SINGAPORE SG Transaction Ref 74541836217288081589523
+# It is the only thing that distinguishes two genuine same-day, same-amount
+# charges to the same merchant, which is why it is worth carrying: UOB bills two
+# ZERO1 lines at 7.06 on the same date every month, and without the reference
+# those two rows are indistinguishable from one page read twice.
+#
+# `\bref\b` will not match "refer" or "referred", and the value must be at least
+# six characters, so prose like "Reference: see page 3" claims nothing.
+# The punctuation class is a single run rather than `\s*[.:#]*\s*` because UOB
+# writes `Ref No. : 7414...` — a full stop, a space, and a colon.
+REF_LABEL = r"(?:transaction\s+)?ref(?:erence)?\b(?:\s*(?:no|num(?:ber)?|id)\b)?[\s.:#]*"
+REF_VALUE = r"([A-Z0-9][A-Z0-9/-]{5,})"
+REF_LINE = re.compile(rf"(?i)^\s*{REF_LABEL}{REF_VALUE}\s*$")
+REF_INLINE = re.compile(rf"(?i)\b{REF_LABEL}{REF_VALUE}\b")
+
 
 class Row:
     __slots__ = ("day", "month", "year", "posted", "description", "amount",
@@ -413,6 +433,34 @@ def _description_below(lines: list[str], i: int, lookahead: int = 2) -> str:
     return ""
 
 
+def _reference_inline(text: str) -> str | None:
+    """A reference the issuer wrote into the description itself."""
+    m = REF_INLINE.search(text)
+    return m.group(1) if m else None
+
+
+def _reference_below(lines: list[str], i: int, lookahead: int = 2) -> str | None:
+    """A reference on its own continuation line beneath the row.
+
+    Bounded, and stops at the next dated row, so a reference can only ever be
+    claimed by the transaction it actually sits under. Blank lines are skipped
+    rather than counted: UOB leaves one between some rows and their reference.
+    """
+    examined = 0
+    for j in range(i + 1, len(lines)):
+        if examined >= lookahead:
+            break
+        if not lines[j].strip():
+            continue
+        if DATE_TOKEN.match(lines[j]):
+            break
+        m = REF_LINE.match(lines[j])
+        if m:
+            return m.group(1)
+        examined += 1
+    return None
+
+
 def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
                fallback_year: int | None = None, statement_date: str | None = None) -> dict:
     """Parse one page of layout-preserved statement text into the record shape."""
@@ -473,7 +521,10 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
             # summary field it belongs to and drop the row.
             field = _summary_field(description, anchored=True)
             if field:
-                if out[field] is None:
+                # Still dropped from the transactions either way — it is a
+                # summary row, not a purchase. Only the figure is withheld,
+                # and for the same reason as the undated case below.
+                if out[field] is None and not ambiguous:
                     out[field] = str(amount)
                 continue
 
@@ -490,9 +541,13 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
                 pd, pm, py = dates[1]
                 py = py or resolve_year(pd, pm, period, fallback_year, statement_date)
                 posted = _iso((pd, pm, py))
+            # Inline first: if the issuer put the reference in the description
+            # it belongs to this row for certain, with no lookahead to get wrong.
+            reference = _reference_inline(description) or _reference_below(lines, i)
             out["transactions"].append({
                 "date": iso, "posted_date": posted, "description": description,
                 "amount": str(amount), "direction": direction,
+                "reference": reference,
             })
             out["_ambiguous_rows"] += int(ambiguous)
             continue
@@ -501,7 +556,18 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
         field = _summary_field(line)
         if field and out[field] is None:
             parsed = parse_amount(line)
-            if parsed:
+            # A summary label followed by more than one figure is a row of a
+            # multi-column table, not a labelled value, and "the last number"
+            # is then the wrong column. Standard Chartered prints
+            # `TOTAL  58.40  50.00` under `New Balance | Min. Payment Due`;
+            # taking 50.00 as the closing balance turns a perfect extraction
+            # into a FAIL 8.40 short. DBS and UOB print the same shape and are
+            # only saved by an earlier page having already filled the field.
+            # There is nothing on the line itself that says which column is
+            # which, so claim nothing: an explicitly labelled line elsewhere,
+            # or read_summary_grid() below, supplies the figure from a source
+            # that does say.
+            if parsed and not parsed[3]:
                 out[field] = str(parsed[0])
 
     read_summary_grid(lines, out)

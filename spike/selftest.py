@@ -243,6 +243,97 @@ def test_row_parsing() -> None:
     check("a merchant containing 'balance' is still a transaction",
           len(shop["transactions"]) == 1, repr(shop["transactions"]))
 
+    # Standard Chartered's front-page summary is a table, not a labelled value:
+    # `TOTAL` sits under `New Balance | Min. Payment Due`, so the last figure on
+    # the line is the minimum payment. Reading it as the closing balance turned
+    # a byte-perfect extraction of standard-chartered-2.pdf into a FAIL 8.40
+    # short — the difference between 58.40 owed and 50.00 due. DBS and UOB print
+    # the same shape and escaped only because an earlier page had already filled
+    # the field. Nothing on the line says which column is which, so take neither.
+    sc = (
+        "     Account/Card No.    New Balance      Min. Payment Due\n"
+        "     TOTAL                     58.40                 50.00\n"
+    )
+    got = rows.parse_page(sc, ("2026-07-16", "2026-08-15"), 2026)
+    check("a multi-column TOTAL row claims no balance",
+          got["closing_balance"] is None, repr(got["closing_balance"]))
+
+    # ...and the figure is not lost: the same statement labels it plainly further
+    # down, which is the source that actually says what it is.
+    got = rows.parse_page(sc + "                  NEW BALANCE          58.40\n",
+                          ("2026-07-16", "2026-08-15"), 2026)
+    check("the labelled line supplies it instead",
+          got["closing_balance"] == "58.40", repr(got["closing_balance"]))
+
+    # The guard is about ambiguity, not about the word TOTAL. One figure, one
+    # meaning — DBS and UOB close their card section exactly like this.
+    got = rows.parse_page("     TOTAL                     2,985.97\n",
+                          ("2026-07-16", "2026-08-15"), 2026)
+    check("a single-figure TOTAL is still read",
+          got["closing_balance"] == "2985.97", repr(got["closing_balance"]))
+
+    # The issuer's reference. UOB and DBS print it on a continuation line under
+    # the row; without it, two genuine same-day, same-amount charges to one
+    # merchant are indistinguishable from a page read twice. UOB bills two ZERO1
+    # lines at 7.06 on the same date every month, so this is not hypothetical.
+    # Note the `. :` — a full stop, a space, then a colon.
+    uob = (
+        "   08 JUL 07 JUL ZERO1 PTE LTD SINGAPORE               7.06\n"
+        "                Ref No. : 74143256188100091281157\n"
+        "\n"
+        "   08 JUL 07 JUL ZERO1 PTE LTD SINGAPORE               7.06\n"
+        "                Ref No. : 74143256188100092450348\n"
+    )
+    got = rows.parse_page(uob, ("2026-06-17", "2026-07-16"), 2026)
+    refs = [t["reference"] for t in got["transactions"]]
+    check("a reference on the line below is captured",
+          refs == ["74143256188100091281157", "74143256188100092450348"], repr(refs))
+
+    # A row the statement gives no reference for must not borrow the next row's.
+    # UOB's payment and instalment rows print none, and the very next line is
+    # already the following transaction.
+    gap = (
+        "   17 JUN 17 JUN CCRD-Credit Card Payment           3,105.18CR\n"
+        "   16 JUN 13 JUN BUS/MRT 870632419 SINGAPORE            2.56\n"
+        "                Ref No. : 74541836167288080019886\n"
+    )
+    got = rows.parse_page(gap, ("2026-06-17", "2026-07-16"), 2026)
+    refs = [t["reference"] for t in got["transactions"]]
+    check("a reference is not stolen from the row below",
+          refs == [None, "74541836167288080019886"], repr(refs))
+
+    # DBS writes the same shape with an alphanumeric value and no space before
+    # the colon, so the reader cannot assume digits or one fixed punctuation.
+    dbs = (
+        "   16 JUN PAYMENT RECEIVED VIA FAST                   686.06 CR\n"
+        "         REF NO: 60616OCBCSGSGBRT8330182\n"
+    )
+    got = rows.parse_page(dbs, ("2026-05-17", "2026-06-16"), 2026)
+    check("an alphanumeric reference is captured",
+          got["transactions"][0]["reference"] == "60616OCBCSGSGBRT8330182",
+          repr(got["transactions"][0]["reference"]))
+
+    # Standard Chartered writes it inline instead, inside the description.
+    sc_ref = "  02 Aug 06 Aug BUS/MRT 901852743 SINGAPORE SG Transaction Ref 74541836217288081589523 4.26\n"
+    got = rows.parse_page(sc_ref, ("2026-07-16", "2026-08-15"), 2026)
+    check("an inline reference is captured",
+          got["transactions"][0]["reference"] == "74541836217288081589523",
+          repr(got["transactions"][0]["reference"]))
+
+    # Prose is not a reference: `refer` is not `ref`, and a short word is not an
+    # identifier. Inventing one would be worse than finding none — it would make
+    # two rows that really are a double-read look distinct.
+    prose = (
+        "   19 Jun  19 Jun  FairPrice App                          0.92\n"
+        "         Please refer to page 3\n"
+        "   20 Jun  20 Jun  Kopitiam                               1.40\n"
+        "         Reference: see page 3\n"
+    )
+    got = rows.parse_page(prose, ("2026-06-17", "2026-07-16"), 2026)
+    check("prose is not read as a reference",
+          [t["reference"] for t in got["transactions"]] == [None, None],
+          repr([t["reference"] for t in got["transactions"]]))
+
 
     # A horizontal summary grid: figures in one row, labels stacked above and
     # aligned by column. Nothing on the figures row says what any of it means.
@@ -359,6 +450,25 @@ def test_sanity_checks() -> None:
                                      t("2026-09-01", "5.00")]), r)
     check("out-of-period date flagged", any("outside period" in w for w in r.warnings))
     check("duplicate row flagged", any("identical row" in w for w in r.warnings))
+
+    # Two rows alike in every field the key used to hold, told apart only by the
+    # reference the statement printed for each. This is every UOB statement.
+    def ref_row(reference):
+        return {"date": "2026-07-08", "description": "ZERO1 PTE LTD SINGAPORE",
+                "amount": "7.06", "direction": "debit", "reference": reference}
+
+    r3 = Result(name="refs")
+    sanity_checks(dict(transactions=[ref_row("74143256188100091281157"),
+                                     ref_row("74143256188100092450348")]), r3)
+    check("distinct references are not a duplicate",
+          not any("identical row" in w for w in r3.warnings), repr(r3.warnings))
+
+    # ...but a row with no reference is still judged on everything else, so a
+    # statement that prints none is no quieter than it was before.
+    r4 = Result(name="norefs")
+    sanity_checks(dict(transactions=[ref_row(None), ref_row(None)]), r4)
+    check("a repeat with no reference is still flagged",
+          any("identical row" in w for w in r4.warnings), repr(r4.warnings))
 
     r2 = Result(name="empty")
     sanity_checks(dict(transactions=[]), r2)

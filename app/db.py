@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS txn (
     category        TEXT,
     category_source TEXT,
     source_page     INTEGER,
+    -- The issuer's own reference for the row, when it prints one. Two genuine
+    -- charges can match on every other field; this is the only thing that
+    -- tells them apart, so dedup_key is built from it too.
+    reference       TEXT,
     dedup_key       TEXT,
     duplicate_of_id INTEGER REFERENCES txn(id)
 );
@@ -107,6 +111,7 @@ def connect() -> sqlite3.Connection:
 # silently never appear on an existing database.
 MIGRATIONS: list[tuple[str, str]] = [
     ("statement", "statement_date TEXT"),
+    ("txn", "reference TEXT"),
 ]
 
 
@@ -173,10 +178,10 @@ def insert_transactions(conn: sqlite3.Connection, statement_id: int, account_id:
     conn.executemany(
         """INSERT INTO txn (account_id, statement_id, txn_date, posted_date,
                             description_raw, amount_minor, currency, amount_sgd_minor,
-                            direction, source_page, dedup_key)
+                            direction, source_page, reference, dedup_key)
            VALUES (:account_id, :statement_id, :txn_date, :posted_date,
                    :description_raw, :amount_minor, :currency, :amount_sgd_minor,
-                   :direction, :source_page, :dedup_key)""",
+                   :direction, :source_page, :reference, :dedup_key)""",
         [dict(r, account_id=account_id, statement_id=statement_id) for r in rows],
     )
 
