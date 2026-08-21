@@ -161,7 +161,14 @@ async def upload(file: UploadFile, password: str = Form("")):
                 "amount_sgd_minor": db.to_minor(t["amount"]),
                 "direction": t["direction"],
                 "source_page": t.get("source_page"),
-                "dedup_key": f"{t['date']}|{t['amount']}|{t['description'].lower()}",
+                "reference": t.get("reference"),
+                # Same reasoning as the duplicate warning in parsing.py: without
+                # the issuer's reference, two real charges collide here and a
+                # future cross-statement check would mark one a duplicate of the
+                # other. Empty when the statement printed none, which leaves the
+                # key exactly as it was.
+                "dedup_key": "|".join(
+                    [t["date"], t["amount"], t["description"].lower(), t.get("reference") or ""]),
             }
             for t in result.transactions
         ])

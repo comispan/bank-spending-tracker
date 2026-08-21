@@ -255,9 +255,14 @@ def sanity_checks(stmt: dict, result: ParseResult) -> None:
     # Two identical rows in one statement are usually genuine — the same shop
     # twice in a day. Flag, never merge: silently dropping a real purchase is
     # worse than showing one the user can delete.
+    # The issuer's own reference is what separates two genuine same-day,
+    # same-amount charges to one merchant from a page read twice — UOB bills two
+    # ZERO1 lines at 7.06 on the same date every month. Rows the statement gives
+    # no reference for fall back to the old key, so nothing gets quieter than it
+    # was; a reference only ever lets a real pair through.
     seen, dupes = set(), 0
     for t in txns:
-        key = (t["date"], t["amount"], t["description"])
+        key = (t["date"], t["amount"], t["description"], t.get("reference"))
         if key in seen:
             dupes += 1
         seen.add(key)
