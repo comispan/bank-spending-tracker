@@ -1,0 +1,39 @@
+{# The inline recategorize control (DESIGN.md §3), shared by the transactions
+   list and the statement detail page so the two cannot drift apart.
+
+   Plain form posts, not HTMX. The design named HTMX, but pulling it from a CDN
+   would be an outbound request from a page rendering someone's complete
+   spending record — §7 — and vendoring a library to avoid one page reload is a
+   poor trade for two <select>s. `onchange` submits the form; the small button
+   is there for anyone who changes only the checkbox. #}
+
+{% macro category_cell(t, categories, flow_types, back) %}
+<form method="post" action="/transactions/{{ t.id }}/category" class="catform">
+  <input type="hidden" name="back" value="{{ back }}">
+  <select name="category" onchange="this.form.submit()" aria-label="Category">
+    <option value="">— uncategorized —</option>
+    {% for c in categories %}
+      <option value="{{ c }}"{% if t.category == c %} selected{% endif %}>{{ c }}</option>
+    {% endfor %}
+  </select>
+  <select name="flow_type" onchange="this.form.submit()" aria-label="Flow type"
+          class="flow {{ t.flow_type or 'spend' }}">
+    {% for f in flow_types %}
+      <option value="{{ f }}"{% if (t.flow_type or 'spend') == f %} selected{% endif %}>{{ f }}</option>
+    {% endfor %}
+  </select>
+  <label class="applyall" title="Remember this merchant and move every row like it">
+    <input type="checkbox" name="apply_all" value="1" checked> all
+  </label>
+  <button type="submit" class="tiny">Save</button>
+  {% if t.category_source %}
+    <span class="src {{ t.category_source }}"
+          title="{{ {'user': 'you set this row by hand',
+                     'rule': 'matched one of your rules',
+                     'memory': 'learned from a decision you made',
+                     'seed': 'a guess shipped with the app — correct it if it is wrong',
+                     'flow': 'not spending, so the category follows from what kind of row it is'}[t.category_source] }}"
+    >{{ t.category_source }}</span>
+  {% endif %}
+</form>
+{% endmacro %}

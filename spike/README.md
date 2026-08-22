@@ -19,6 +19,41 @@ So the table is parsed in code, in [`rows.py`](rows.py). The consequences are wo
 
 What this gives up is the ability to read a page with no text layer. A scanned statement is now reported and skipped; see [Scanned statements](#scanned-statements).
 
+## Grading a tier-3 model
+
+`eval_categories.py` answers the question DESIGN.md §9.4 leaves open — cloud
+model or local one — with a number instead of a preference. It grades a
+candidate against the merchants **you** categorized by hand, which is the only
+ground truth that exists for your own spending.
+
+```powershell
+python spike\eval_categories.py --list
+python spike\eval_categories.py --model baseline
+python spike\eval_categories.py --model qwen2.5:3b-instruct
+python spike\eval_categories.py --model claude-sonnet-5 --anthropic
+```
+
+It measures what would actually ship, gate included. Every response goes through
+the same contract tier 3 would enforce — no invented merchants, none dropped,
+every category inside the fixed thirteen — and a model that scores well but
+breaks the contract is reported as unusable, because it is. That is the same
+silent-failure shape as the empty array above: correct-looking content, broken
+format.
+
+Read the three numbers in this order:
+
+- **WRONG** is the one that decides it. A confident disagreement is what tier 3
+  would write into merchant memory and mislabel your spending with.
+- **abstained** is not a failure. `unknown` leaves a row uncategorized, which is
+  honest and one click from fixed.
+- **correct** means nothing without the baseline printed beside it — always
+  answering your single most common category already scores 53% on this set.
+
+Nothing leaves the machine without `--anthropic`, and even then only merchant
+names — no amounts, dates, balances or card numbers. Pin `-instruct` tags for
+local models; a bare tag is often the thinking build, which narrates into the
+response and breaks the format contract before the categories are looked at.
+
 ## Setup
 
 Statements are among the most sensitive documents you own. `spike/statements/`, `spike/out/`, and `passwords.json` are all gitignored — check that before you copy anything in.

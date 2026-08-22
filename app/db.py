@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import categorize
 import merchants
 
 ROOT = Path(__file__).parent.parent
@@ -95,6 +97,42 @@ CREATE TABLE IF NOT EXISTS txn (
 
 CREATE INDEX IF NOT EXISTS txn_by_statement ON txn(statement_id);
 CREATE INDEX IF NOT EXISTS txn_by_date ON txn(txn_date);
+CREATE INDEX IF NOT EXISTS txn_by_merchant ON txn(merchant_normalized);
+
+-- Tier 1 (DESIGN.md §3): the user's own patterns, which always win. Kept
+-- separate from merchant_memory because a rule is a standing instruction and
+-- memory is an observation — a rule survives being contradicted by a later
+-- click, and that is the whole point of it being tier 1.
+CREATE TABLE IF NOT EXISTS merchant_rule (
+    id          INTEGER PRIMARY KEY,
+    pattern     TEXT NOT NULL,
+    match_type  TEXT NOT NULL DEFAULT 'contains'
+                CHECK (match_type IN ('exact', 'contains', 'regex')),
+    category    TEXT,
+    flow_type   TEXT,
+    -- Higher first. Ties break by id, so the older rule wins and adding a rule
+    -- never silently changes what an existing one was already doing.
+    priority    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Tier 2: what the app has learned, keyed by the merchant key from
+-- merchants.py. `source` separates a decision the user made from a seeded
+-- guess shipped with the app — they are not the same claim, and the UI says
+-- so. A user decision overwrites a seed permanently; a seed never overwrites a
+-- user decision.
+-- No flow_type column here, unlike merchant_rule, and §5 has it that way for a
+-- reason: a category is a property of the merchant, but whether a particular
+-- row was a purchase or a refund is a property of the row. Learning "Uniqlo is
+-- Shopping" from one purchase must not then declare every future Uniqlo refund
+-- to be spending.
+CREATE TABLE IF NOT EXISTS merchant_memory (
+    merchant_normalized TEXT PRIMARY KEY,
+    category    TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'memory' CHECK (source IN ('memory', 'seed')),
+    hit_count   INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -213,6 +251,179 @@ def renormalize_merchants(conn: sqlite3.Connection) -> int:
     return len(updates)
 
 
+# -------------------------------------------------------- categorization
+
+def seed_memory(conn: sqlite3.Connection) -> int:
+    """Put the shipped guesses into tier 2, once, without ever overwriting.
+
+    `INSERT OR IGNORE` is doing the load-bearing work: a key the user has
+    already decided on is left exactly as it is, on every boot, forever. A seed
+    is only ever allowed to fill a gap.
+    """
+    cur = conn.executemany(
+        """INSERT OR IGNORE INTO merchant_memory (merchant_normalized, category, source)
+           VALUES (?, ?, 'seed')""",
+        list(categorize.SEED_MEMORY.items()),
+    )
+    return cur.rowcount
+
+
+def merchant_rules(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Tier 1, highest priority first; ties to the older rule."""
+    return conn.execute(
+        "SELECT * FROM merchant_rule ORDER BY priority DESC, id ASC"
+    ).fetchall()
+
+
+def memory_map(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    return {
+        r["merchant_normalized"]: {"category": r["category"], "source": r["source"]}
+        for r in conn.execute("SELECT * FROM merchant_memory")
+    }
+
+
+def recategorize_all(conn: sqlite3.Connection) -> int:
+    """Re-resolve every row the user did not set by hand. Returns rows moved.
+
+    Same argument as `renormalize_merchants`: the resolution is a pure function
+    of the row plus the rules plus the memory, so it can be replayed whenever
+    any of those change, and a new rule reaches the statements already uploaded
+    instead of only the next one.
+
+    `category_source = 'user'` is the one thing this will not touch. A person
+    who clicked a category on a specific row has said something more specific
+    than any rule, and having that quietly reverted on the next boot would make
+    the app untrustworthy in exactly the way §2.3 is about.
+    """
+    rules = merchant_rules(conn)
+    memory = memory_map(conn)
+    updates, hits = [], Counter()
+
+    for row in conn.execute(
+        """SELECT id, description_raw, merchant_normalized, direction,
+                  category, flow_type, category_source FROM txn"""
+    ):
+        if row["category_source"] == "user":
+            continue
+        merchant = row["merchant_normalized"] or ""
+        category, flow, source = categorize.resolve(
+            row["description_raw"], merchant, row["direction"], rules, memory)
+        if source in ("memory", "seed"):
+            hits[merchant if merchant in memory else merchants.merchant_root(merchant)] += 1
+        if (category, flow, source) != (row["category"], row["flow_type"], row["category_source"]):
+            updates.append((category, flow, source, row["id"]))
+
+    conn.executemany(
+        "UPDATE txn SET category = ?, flow_type = ?, category_source = ? WHERE id = ?",
+        updates,
+    )
+    # hit_count is what makes a stale seed visible: an entry nothing matches is
+    # a guess about a merchant this user does not have.
+    conn.executemany(
+        "UPDATE merchant_memory SET hit_count = ? WHERE merchant_normalized = ?",
+        [(hits.get(key, 0), key) for key in memory],
+    )
+    return len(updates)
+
+
+def remember(conn: sqlite3.Connection, merchant: str, category: str) -> None:
+    """Write a user decision into tier 2, replacing whatever was there.
+
+    §3: every recategorization feeds the memory, which is the loop that makes
+    the app feel smart by month three. The source flips to `memory` here, so a
+    seeded guess that gets corrected stops being labelled a guess.
+    """
+    conn.execute(
+        """INSERT INTO merchant_memory (merchant_normalized, category, source, updated_at)
+           VALUES (?, ?, 'memory', datetime('now'))
+           ON CONFLICT(merchant_normalized) DO UPDATE SET
+               category = excluded.category,
+               source = 'memory',
+               updated_at = excluded.updated_at""",
+        (merchant, category),
+    )
+
+
+def set_category(conn: sqlite3.Connection, txn_id: int, category: str | None,
+                 flow_type: str, apply_to_matching: bool) -> tuple[int, str]:
+    """Apply a user's choice to one row, and optionally to its siblings.
+
+    Returns (rows changed, merchant key). The chosen row is always marked
+    `user`; the siblings are marked `memory`, because they were not individually
+    decided and should keep following the memory entry if it changes later.
+
+    Siblings already marked `user` are left alone. An earlier explicit decision
+    outranks a bulk apply — the user can still open that row and change it.
+
+    **`apply_to_matching` also controls whether this is remembered at all**, and
+    that is a deliberate reading of §3's "write it back to tier 2 *and* offer to
+    apply it to past matches". Those cannot be two independent choices: memory
+    feeds `recategorize_all`, so anything written here reaches the past rows on
+    the next pass whatever the checkbox said. Rather than let the checkbox
+    quietly do nothing, it means what a person would expect it to mean —
+    remember this merchant and move every row like it, or touch this one row
+    only.
+    """
+    row = conn.execute(
+        """SELECT merchant_normalized, description_raw, direction
+           FROM txn WHERE id = ?""", (txn_id,)).fetchone()
+    if not row:
+        return 0, ""
+    merchant = row["merchant_normalized"] or ""
+
+    # Clearing the category and leaving the flow at what the parser derived is
+    # how a person says "forget what I told you about this row", so it goes back
+    # under automatic resolution rather than being frozen as a user decision
+    # with nothing in it — a state nothing could ever move again. Any other
+    # combination is a real choice and is marked as one.
+    derived = categorize.default_flow(row["description_raw"], row["direction"])
+    source = None if (category is None and flow_type == derived) else "user"
+
+    conn.execute(
+        "UPDATE txn SET category = ?, flow_type = ?, category_source = ? WHERE id = ?",
+        (category, flow_type, source, txn_id),
+    )
+    changed = 1
+
+    if category and apply_to_matching and merchant:
+        remember(conn, merchant, category)
+    if apply_to_matching and merchant:
+        # flow_type is deliberately not applied to the siblings: it is a
+        # property of the individual row, and a refund sitting among purchases
+        # at the same merchant must stay a refund.
+        # COALESCE, not `category_source <> 'user'`: an uncategorized row has
+        # NULL there, and `NULL <> 'user'` is NULL rather than true, so the
+        # plain comparison skips exactly the rows this is for. It looked like it
+        # worked only because recategorize_all() picked them up a moment later
+        # through the memory entry — while the count reported back to the user
+        # said nothing had been applied.
+        cur = conn.execute(
+            """UPDATE txn SET category = ?, category_source = 'memory'
+               WHERE merchant_normalized = ? AND id <> ?
+                 AND COALESCE(category_source, '') <> 'user'""",
+            (category, merchant, txn_id),
+        )
+        changed += cur.rowcount
+    return changed, merchant
+
+
+def add_rule(conn: sqlite3.Connection, pattern: str, match_type: str,
+             category: str | None, flow_type: str | None, priority: int) -> None:
+    conn.execute(
+        """INSERT INTO merchant_rule (pattern, match_type, category, flow_type, priority)
+           VALUES (?, ?, ?, ?, ?)""",
+        (pattern.strip(), match_type, category or None, flow_type or None, priority),
+    )
+
+
+def delete_rule(conn: sqlite3.Connection, rule_id: int) -> None:
+    conn.execute("DELETE FROM merchant_rule WHERE id = ?", (rule_id,))
+
+
+def forget_merchant(conn: sqlite3.Connection, merchant: str) -> None:
+    conn.execute("DELETE FROM merchant_memory WHERE merchant_normalized = ?", (merchant,))
+
+
 def delete_statement(conn: sqlite3.Connection, statement_id: int) -> str | None:
     """Hard delete, per DESIGN.md §7. Returns the stored file path to unlink."""
     row = conn.execute("SELECT storage_path FROM statement WHERE id = ?", (statement_id,)).fetchone()
@@ -261,3 +472,74 @@ def totals_for(conn: sqlite3.Connection, statement_id: int) -> dict[str, int]:
         (statement_id,),
     ).fetchone()
     return {"debits": row["debits"], "credits": row["credits"]}
+
+
+def coverage(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Which tier answered, over every transaction stored.
+
+    §3 predicts roughly 10% from rules and 75% from memory once warm. Showing
+    the real split is how you find out whether that is happening — and the
+    `none` bucket is the honest size of the gap tier 3 (or the user) has to
+    close, rather than a pile of rows quietly filed under Other.
+    """
+    by_source = {r["src"] or "none": r["n"] for r in conn.execute(
+        "SELECT category_source AS src, COUNT(*) AS n FROM txn GROUP BY 1")}
+    by_flow = {r["flow"] or "unset": r["n"] for r in conn.execute(
+        "SELECT flow_type AS flow, COUNT(*) AS n FROM txn GROUP BY 1")}
+    total = sum(by_source.values())
+    return {
+        "total": total,
+        "by_source": by_source,
+        "by_flow": by_flow,
+        "categorized": total - by_source.get("none", 0),
+        "spend_minor": conn.execute(
+            """SELECT COALESCE(SUM(CASE WHEN flow_type = 'spend'  THEN amount_sgd_minor
+                                        WHEN flow_type = 'refund' THEN -amount_sgd_minor
+                                   END), 0) AS n FROM txn"""
+        ).fetchone()["n"],
+    }
+
+
+def merchant_summary(conn: sqlite3.Connection, unknown_only: bool = True) -> list[dict[str, Any]]:
+    """One row per merchant key, for categorizing in bulk.
+
+    The backlog is far smaller than it looks: 103 uncategorized rows in the
+    corpus are 43 merchants, and five of them account for 59 rows. Deciding once
+    per merchant instead of once per transaction is the difference between a
+    few minutes and an afternoon — and it is also how the decision gets stored,
+    since merchant_memory is keyed by merchant, not by row.
+
+    `value_minor` is net spend, not the gross sum: a merchant whose rows are all
+    transfers has moved a lot of money and spent none of it, and sorting it to
+    the top of a spending screen would be a lie about where the money went.
+    """
+    having = "HAVING unknown > 0" if unknown_only else ""
+    rows = conn.execute(
+        f"""SELECT t.merchant_normalized               AS key,
+                   COUNT(*)                            AS rows_total,
+                   SUM(CASE WHEN t.category IS NULL THEN 1 ELSE 0 END) AS unknown,
+                   SUM(CASE WHEN t.flow_type = 'spend'  THEN t.amount_sgd_minor
+                            WHEN t.flow_type = 'refund' THEN -t.amount_sgd_minor
+                            ELSE 0 END)                AS value_minor,
+                   MIN(t.txn_date)                     AS first_seen,
+                   MAX(t.txn_date)                     AS last_seen,
+                   MAX(t.description_raw)              AS example,
+                   MAX(t.category)                     AS current_category,
+                   m.source                            AS memory_source
+            FROM txn t
+            LEFT JOIN merchant_memory m ON m.merchant_normalized = t.merchant_normalized
+            WHERE t.merchant_normalized IS NOT NULL AND t.merchant_normalized <> ''
+            GROUP BY t.merchant_normalized
+            {having}"""
+    ).fetchall()
+    # Cluster in Python rather than SQL: the ordering wants each root's combined
+    # weight, which is a second pass over the same rows and reads far better as
+    # a tested function than as a correlated subquery.
+    return merchants.cluster_order([dict(r, weight=abs(r["value_minor"] or 0)) for r in rows])
+
+
+def list_memory(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT * FROM merchant_memory
+           ORDER BY hit_count DESC, source ASC, merchant_normalized ASC"""
+    ).fetchall()
