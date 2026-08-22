@@ -99,6 +99,11 @@ tbody tr:hover { background: var(--panel); }
 .date { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .muted { color: var(--muted); }
 .file { display: block; color: var(--muted); font-size: .78rem; }
+/* The merchant key, shown under a description only when it differs from it.
+   Monospaced because it is a key, not prose — and visible because a key you
+   cannot see is one you cannot tell is wrong. */
+.merchant { display: block; color: var(--muted); font-size: .74rem; margin-top: .15rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .actions a { font-size: .85rem; }
 table.compact td, table.compact th { padding: .35rem .5rem; font-size: .85rem; }
 

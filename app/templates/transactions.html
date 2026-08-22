@@ -5,7 +5,9 @@
 <h1>{{ txns|length }} transactions</h1>
 <p class="hint">
   Every card, newest first. Categories arrive in Phase 2 and the monthly report
-  in Phase 3 — this list is deliberately just the parsed rows.
+  in Phase 3 — this list is deliberately just the parsed rows. The small grey
+  line under a description is the merchant key the categorizer will learn
+  against; it is shown only where it differs from what the statement printed.
 </p>
 
 {% if not txns %}
@@ -20,7 +22,11 @@
     <tr>
       <td class="date">{{ t.txn_date }}</td>
       <td class="muted">{{ t.issuer }}{% if t.last4 %} ····{{ t.last4 }}{% endif %}</td>
-      <td>{{ t.description_raw }}</td>
+      <td>{{ t.description_raw }}
+        {% if t.merchant_normalized and t.merchant_normalized != t.description_raw|lower %}
+          <span class="merchant">{{ t.merchant_normalized }}</span>
+        {% endif %}
+      </td>
       <td class="num {{ t.direction }}">{{ t.amount_sgd_minor | money }}</td>
       <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
     </tr>

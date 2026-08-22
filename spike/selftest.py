@@ -374,6 +374,124 @@ def test_row_parsing() -> None:
           repr(pair["opening_balance"]))
 
 
+def test_merchant_normalization() -> None:
+    """The key tier 2 of the categorizer looks up (DESIGN.md §3).
+
+    Every string here is either synthetic or already in git — the real corpus is
+    checked on the machine that holds it, never from a session.
+
+    What is being asserted throughout is *stability*, not tidiness: the same
+    merchant reaches the same key next month, and two merchants do not share
+    one. A prettier key that moves is worse than an ugly key that does not.
+    """
+    print("\nmerchant normalization")
+    import merchants
+
+    def key(s: str) -> str:
+        return merchants.normalize(s)
+
+    # The case DESIGN.md §3 names outright. Without this, next month's receipt
+    # number is a new merchant and the user categorizes Grab all over again.
+    starred = {key("GRAB *TRIP 4821 SINGAPORE SG"), key("GRAB *TRIP 9903 SINGAPORE SG"),
+               key("GRAB* TRIP 1174")}
+    check("a receipt number does not invent a new merchant", starred == {"grab"}, repr(starred))
+
+    # The third spelling in §3 has no star to cut at, so it keeps a word the
+    # others dropped. It meets them at the root instead — which is the whole
+    # reason there is a root, rather than normalization guessing that `trip` is
+    # a service word and not part of somebody's name.
+    check("a starless spelling meets the others at the root",
+          merchants.merchant_root(key("Grab Trip SG")) == "grab", repr(key("Grab Trip SG")))
+
+    check("a store number and its city are dropped",
+          key("FAIRPRICE FINEST 203 SINGAPORE SG") == "fairprice finest",
+          repr(key("FAIRPRICE FINEST 203 SINGAPORE SG")))
+
+    # Order matters, and this is the regression: the place is not at the end
+    # until the reference has been cut off it. 62 rows of one statement end
+    # `... SINGAPORE 065`, so stripping places first leaves `singapore` in
+    # every one of them.
+    check("a place is stripped even when a reference follows it",
+          key("PAYNOW TRANSFER SINGAPORE 065") == "paynow transfer",
+          repr(key("PAYNOW TRANSFER SINGAPORE 065")))
+
+    # ...but a place at the *front* is a name.
+    check("a leading place name survives",
+          key("SINGAPORE AIRLINES SINGAPORE SG") == "singapore airlines",
+          repr(key("SINGAPORE AIRLINES SINGAPORE SG")))
+
+    # Eleven rows in the corpus open with a token holding a digit. Cutting at
+    # the first junk token would leave nothing at all, so position 0 is never a
+    # cut point.
+    check("a merchant whose name starts with a code is not cut away",
+          key("ZERO1 PTE LTD SINGAPORE") == "zero1 pte ltd",
+          repr(key("ZERO1 PTE LTD SINGAPORE")))
+    check("short numbers are names, not references",
+          key("HOTEL 81 PRINCESS SG") == "hotel 81 princess",
+          repr(key("HOTEL 81 PRINCESS SG")))
+
+    # Two issuers, two ways of printing the same transit ride: UOB puts the
+    # reference in the middle, Standard Chartered writes it inline at the end.
+    # Both are one merchant and must key as one.
+    uob = key("BUS/MRT 870632419 SINGAPORE")
+    sc = key("BUS/MRT 901852743 SINGAPORE SG Transaction Ref 74541836217288081589523")
+    check("two issuers' reference styles reach one key", uob == sc == "bus/mrt", repr((uob, sc)))
+
+    # A domain names the merchant, and everything after it is contact detail.
+    for raw, want in [("NETFLIX.COM 866-579-7172 SG", "netflix"),
+                      ("APPLE.COM/BILL ITUNES.COM SG", "apple"),
+                      ("BOOKING.COM AMSTERDAM NL", "booking")]:
+        check(f"a domain resolves to its name ({want})", key(raw) == want, repr(key(raw)))
+
+    # ...but only for real TLDs, or `MR.DIY` becomes a merchant called `mr` and
+    # collects every other `mr.` alongside it.
+    check("an unknown suffix is not treated as a domain",
+          key("MR.DIY TAMPINES SG").startswith("mr.diy"), repr(key("MR.DIY TAMPINES SG")))
+
+    # A star means two different things. A processor prints itself first...
+    check("a processor prefix keeps what follows",
+          key("SQ *BLUE BOTTLE COFFEE") == "blue bottle coffee",
+          repr(key("SQ *BLUE BOTTLE COFFEE")))
+    # ...and everyone else prints their own order number after their name.
+    # Guessing wrong the other way is worse: it keys on a number that changes.
+    check("a merchant prefix keeps what precedes",
+          key("WIDGETCO SG*ORD8821 WIDGETCO.SG") == "widgetco",
+          repr(key("WIDGETCO SG*ORD8821 WIDGETCO.SG")))
+
+    # One statement prints the issuer's abbreviation and the merchant's own
+    # domain in a single description; without the alias that row is two keys.
+    check("an issuer abbreviation and the merchant's own name agree",
+          key("AMZN Mktp SG*RT4G91 AMAZON.SG") == "amazon",
+          repr(key("AMZN Mktp SG*RT4G91 AMAZON.SG")))
+
+    # §3 nets refunds against the original merchant, which needs the refund to
+    # land on the merchant's key rather than one of its own.
+    check("a refund keys as the merchant it reverses",
+          key("UNIQLO ION ORCHARD - REFUND") == key("UNIQLO ION ORCHARD SINGAPORE SG"),
+          repr((key("UNIQLO ION ORCHARD - REFUND"), key("UNIQLO ION ORCHARD SINGAPORE SG"))))
+
+    # Merging two merchants is worse than keeping two keys for one: a merge
+    # applies a learned category to a shop the user never categorized.
+    check("merchants sharing a first word stay apart",
+          key("ROYAL PLAZA SINGAPORE") != key("ROYAL SPORTING HOUSE SINGAPORE"),
+          repr(key("ROYAL PLAZA SINGAPORE")))
+
+    # An empty key is one bucket that every unreadable row falls into and is
+    # then categorized together — the silent wrongness §2.3 exists to prevent.
+    for odd in ["***", "065", "SG", "   ", "-"]:
+        k = key(odd)
+        check(f"never empty for {odd!r}", k != "" or odd.strip() == "", repr(k))
+
+    # Normalizing a key must not move it, or a backfill drifts every time it
+    # runs and merchant memory slowly stops matching what is stored.
+    inputs = ["GRAB *TRIP 4821 SINGAPORE SG", "FAIRPRICE FINEST 203 SINGAPORE SG",
+              "NETFLIX.COM 866-579-7172 SG", "BUS/MRT 870632419 SINGAPORE",
+              "ZERO1 PTE LTD SINGAPORE", "UNIQLO ION ORCHARD - REFUND",
+              "AMZN Mktp SG*RT4G91 AMAZON.SG", "SQ *BLUE BOTTLE COFFEE"]
+    drift = [s for s in inputs if key(key(s)) != key(s)]
+    check("normalizing a key leaves it alone", not drift, repr(drift))
+
+
 def test_cli_runs() -> None:
     """Actually invoke the CLI.
 
@@ -482,6 +600,7 @@ if __name__ == "__main__":
     test_encryption_paths()
     test_row_detection()
     test_row_parsing()
+    test_merchant_normalization()
     test_cli_runs()
     test_reconciliation()
     test_sanity_checks()
