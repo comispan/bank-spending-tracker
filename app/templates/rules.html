@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Rules &amp; memory{% endblock %}
+{% block content %}
+
+<h1>Rules &amp; memory</h1>
+<p class="hint">
+  The two free tiers of the categorizer. A <strong>rule</strong> is a standing
+  instruction you write and it always wins; <strong>memory</strong> is what the
+  app learned from the categories you picked, plus a small seeded starter list.
+  Changing anything here re-resolves every transaction that you did not set by
+  hand — rows you categorized yourself are never overwritten.
+</p>
+
+{% if stats.total %}
+<section class="coverage">
+  <p class="tiers">
+    {% for src in ['rule', 'memory', 'seed', 'flow', 'user', 'none'] %}
+      {% if stats.by_source.get(src) %}
+        <span class="src {{ src }}">{{ src }}</span> {{ stats.by_source[src] }}
+      {% endif %}
+    {% endfor %}
+    <span class="muted">of {{ stats.total }} transactions</span>
+  </p>
+</section>
+{% endif %}
+
+<h2>Rules <span class="muted">tier 1</span></h2>
+
+<form method="post" action="/rules" class="rulesform">
+  <input type="text" name="pattern" placeholder="pattern, e.g. bus/mrt" required
+         autocomplete="off">
+  <select name="match_type" aria-label="Match type">
+    <option value="contains">contains</option>
+    <option value="exact">exact</option>
+    <option value="regex">regex</option>
+  </select>
+  <select name="category" aria-label="Category">
+    <option value="">— no category —</option>
+    {% for c in categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+  </select>
+  <select name="flow_type" aria-label="Flow type">
+    <option value="">— leave flow alone —</option>
+    {% for f in flow_types %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+  </select>
+  <input type="number" name="priority" value="0" min="-99" max="99"
+         aria-label="Priority" title="Higher runs first; ties go to the older rule">
+  <button type="submit">Add rule</button>
+</form>
+<p class="hint">
+  A pattern is matched against both the merchant key and the line the statement
+  printed, so either is a reasonable thing to write a rule about. Leave the
+  category empty to write a rule that only changes the flow type — useful for
+  marking something a transfer so it drops out of the spend total.
+</p>
+
+{% if not rules %}
+  <p class="empty">No rules. The seeded memory below is doing the work for now.</p>
+{% else %}
+<table>
+  <thead>
+    <tr><th>Pattern</th><th>Match</th><th>Category</th><th>Flow</th>
+        <th class="num">Priority</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for r in rules %}
+    <tr>
+      <td><code>{{ r.pattern }}</code></td>
+      <td class="muted">{{ r.match_type }}</td>
+      <td>{{ r.category or "—" }}</td>
+      <td>{% if r.flow_type %}<span class="flowtag {{ r.flow_type }}">{{ r.flow_type }}</span>{% else %}—{% endif %}</td>
+      <td class="num">{{ r.priority }}</td>
+      <td class="actions">
+        <form method="post" action="/rules/{{ r.id }}/delete">
+          <button type="submit" class="tiny danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Merchant memory <span class="muted">tier 2</span></h2>
+<p class="hint">
+  <span class="src seed">seed</span> is a guess shipped with the app;
+  <span class="src memory">memory</span> is a decision you made. Rows counts how
+  many transactions each one currently answers — a seed matching nothing is a
+  guess about a merchant you do not have, and costs nothing to leave.
+</p>
+
+{% if not memory %}
+  <p class="empty">Nothing learned yet.</p>
+{% else %}
+<table>
+  <thead>
+    <tr><th>Merchant key</th><th>Category</th><th>Source</th>
+        <th class="num">Rows</th><th>Updated</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for e in memory %}
+    <tr>
+      <td><code>{{ e.merchant_normalized }}</code></td>
+      <td>{{ e.category }}</td>
+      <td><span class="src {{ e.source }}">{{ e.source }}</span></td>
+      <td class="num {% if not e.hit_count %}muted{% endif %}">{{ e.hit_count }}</td>
+      <td class="muted">{{ e.updated_at }}</td>
+      <td class="actions">
+        <form method="post" action="/memory/forget">
+          <input type="hidden" name="merchant" value="{{ e.merchant_normalized }}">
+          <button type="submit" class="tiny danger">Forget</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<p class="hint">
+  There is no third tier yet. A merchant that no rule and no memory entry knows
+  stays uncategorized and is counted honestly as unknown, rather than being
+  filed under <em>Other</em> where it would look answered.
+</p>
+
+{% endblock %}

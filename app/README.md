@@ -19,6 +19,7 @@ the uploaded PDFs — and is gitignored.
 | `rows.py` | The parser. Moved here from the Phase 0 spike unchanged; it is the one component proven against real statements. |
 | `parsing.py` | PDF → verified transactions: decrypt, redact, parse, reconcile. |
 | `merchants.py` | Description → the merchant key the categorizer learns against. Phase 2, step 1. |
+| `categorize.py` | Tiers 1 and 2, and the `flow_type` axis. Pure functions; no DB, no network. |
 | `db.py` | SQLite schema and queries. Money is integer minor units, never a float. |
 | `main.py` | FastAPI routes and the four pages. |
 
@@ -57,11 +58,47 @@ merchant does end up with two keys, `merchant_root()` — the first word — is 
 fallback that reunites them, and tier 2 will look up the precise key first and
 the root second.
 
-**Merchant keys are recomputed on every boot.** They are derived from
-`description_raw` by a pure function, so improving `merchants.py` re-keys the
-statements already uploaded instead of leaving them on the old rules. A normal
-boot moves zero rows and prints nothing; any other number means the rules just
-changed under data that may already be categorized.
+**The bulk screen categorizes merchants, not transactions.** `/merchants` is
+the fast way to a complete report, and it needs no model: the uncategorized
+rows are far fewer merchants than they look, and one decision there settles
+every past row from that merchant and every future one. It sorts by money, and
+lists keys sharing a first word together — a merchant the statement spells two
+ways shows up as adjacent rows. They are never merged automatically; that is
+the eager root-collapse `merchants.py` refuses, and the person reading the
+screen can see what a machine should not assume.
+
+**An unknown merchant stays uncategorized, not `Other`.** There is no third
+tier yet, so a merchant no rule and no memory entry knows gets nothing, and the
+transactions page counts it honestly as unknown. Filing it under `Other` would
+make the same gap look answered — and `Other` is a real category a user may
+genuinely choose, so it cannot double as "we don't know".
+
+**"Apply to all matching" also controls whether the choice is remembered.**
+§3 asks for the mapping to be written to tier 2 *and* for applying it to past
+rows to be offered. Those cannot be two independent switches: memory feeds the
+re-resolution pass, so anything remembered reaches the past rows on the next
+boot regardless of what the checkbox said. Rather than let the checkbox quietly
+do nothing, it means what it appears to mean.
+
+**Non-spend rows are categorized without any merchant lookup.** A card payment
+is `Cash & Transfers` because of what kind of row it is, not because anyone
+learned the merchant — that is the `flow` source. A refund is deliberately not
+treated this way: §3 nets refunds against the original merchant, and
+normalization already keys the refund to that merchant, so it inherits that
+merchant's category instead.
+
+**The flow classifier is biased toward `spend`.** Ambiguous rows — a GIRO that
+might be a bill or might be a card payment, a PayNow that might be lunch — stay
+spending. A row wrongly left in the total is visible and one click from fixed;
+a row wrongly excluded is money that vanishes from the report, and a total
+that is quietly too low looks exactly like a frugal month.
+
+**Merchant keys and categories are recomputed on every boot.** Both are derived
+from the stored row by pure functions, so improving `merchants.py` or
+`categorize.py` re-keys and re-resolves the statements already uploaded instead
+of leaving them on the old rules. A normal boot moves zero rows and prints
+nothing. The one thing a re-resolution never touches is a row whose
+`category_source` is `user`.
 
 **`unverified` is a defect state, not a resting state.** It means the statement
 printed no totals to check against — which is indistinguishable from a parse
@@ -69,9 +106,18 @@ that is simply wrong. Both real bugs found in Phase 0 were hiding under it.
 
 ## Not here yet
 
-The three-tier category resolver, `flow_type`, and the recategorize UI (the
-rest of Phase 2 — merchant keys are stored but nothing reads them yet), the
-cross-statement monthly report and transaction-level dedup (Phase 3), OCR for
-scanned statements (Phase 4). Foreign-currency sublines are parsed into the description but not yet
+**Tier 3** — a model for the merchants tiers 1 and 2 do not know (§3, step 5).
+Everything in the app today is free, offline and exact; the resolver returns
+nothing for an unknown merchant and the UI shows that as a gap, which is the
+shape tier 3 slots into when it arrives. It fills the `None`s and touches
+nothing else. The open question in §9.4 — a cloud model or a local one — is
+still open, and is the only place in the app where anything would leave the
+machine.
+
+Also absent: the cross-statement monthly report and transaction-level dedup
+(Phase 3), OCR for scanned statements (Phase 4), and `category_confidence` from
+§5 — nothing produces a confidence today, because a rule, a memory hit and a
+derived flow are all certain. It goes in with tier 3, which is the first thing
+that will have an opinion rather than an answer. Foreign-currency sublines are parsed into the description but not yet
 split into `amount_minor` + `fx_rate`; the columns exist and DESIGN.md §4 says
 how they should be filled.

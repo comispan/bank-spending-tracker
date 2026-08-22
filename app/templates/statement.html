@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% block title %}{{ s.issuer }} — {{ s.period_end or s.filename }}{% endblock %}
 {% block content %}
 
@@ -42,11 +43,11 @@
 <h2>{{ txns|length }} transactions</h2>
 <table>
   <thead>
-    <tr><th>Date</th><th>Posted</th><th>Description</th><th class="num">Amount</th><th>Dir</th><th class="num">Page</th></tr>
+    <tr><th>Date</th><th>Posted</th><th>Description</th><th class="num">Amount</th><th>Dir</th><th>Category</th><th class="num">Page</th></tr>
   </thead>
   <tbody>
   {% for t in txns %}
-    <tr>
+    <tr id="t{{ t.id }}">
       <td class="date">{{ t.txn_date }}</td>
       <td class="date muted">{{ t.posted_date or "" }}</td>
       <td>{{ t.description_raw }}
@@ -56,6 +57,7 @@
       </td>
       <td class="num {{ t.direction }}">{{ t.amount_minor | money }}</td>
       <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
+      <td>{{ m.category_cell(t, categories, flow_types, '/statements/' ~ s.id) }}</td>
       <td class="num muted">{{ t.source_page or "" }}</td>
     </tr>
   {% endfor %}

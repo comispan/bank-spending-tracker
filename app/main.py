@@ -27,6 +27,7 @@ from fastapi.templating import Jinja2Templates
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import categorize  # noqa: E402
 import db          # noqa: E402
 import merchants   # noqa: E402
 import parsing     # noqa: E402
@@ -42,14 +43,20 @@ templates = Jinja2Templates(directory=HERE / "templates")
 @app.on_event("startup")
 def startup() -> None:
     db.init()
-    # Merchant keys are derived, not entered, so a change to merchants.py is
-    # allowed to re-key what is already stored. A count, never a description —
-    # DESIGN.md §7 says don't log those.
+    # Merchant keys and categories are derived, not entered, so a change to
+    # merchants.py or categorize.py is allowed to re-key and re-resolve what is
+    # already stored — the alternative is old statements silently keeping rules
+    # that no longer exist. Counts, never descriptions: DESIGN.md §7.
     with db.connect() as conn:
         moved = db.renormalize_merchants(conn)
+        seeded = db.seed_memory(conn)
+        recategorized = db.recategorize_all(conn)
         conn.commit()
-    if moved:
-        print(f"merchant keys recomputed for {moved} transaction(s)")
+    for label, n in (("merchant keys recomputed", moved),
+                     ("merchants seeded", seeded),
+                     ("transactions recategorized", recategorized)):
+        if n:
+            print(f"{label}: {n}")
 
 
 def money(minor: int | None) -> str:
@@ -185,13 +192,17 @@ async def upload(file: UploadFile, password: str = Form("")):
             }
             for t in result.transactions
         ])
+        # Resolve through the same pass the boot uses rather than a second copy
+        # of the tier order living here — one resolution path, always.
+        db.recategorize_all(conn)
         conn.commit()
 
     return RedirectResponse(f"/statements/{statement_id}", status_code=303)
 
 
 @app.get("/statements/{statement_id}", response_class=HTMLResponse)
-def statement_detail(request: Request, statement_id: int, notice: str | None = None):
+def statement_detail(request: Request, statement_id: int,
+                     notice: str | None = None, error: str | None = None):
     with db.connect() as conn:
         stmt = db.get_statement(conn, statement_id)
         if not stmt:
@@ -200,7 +211,8 @@ def statement_detail(request: Request, statement_id: int, notice: str | None = N
         totals = db.totals_for(conn, statement_id)
     return templates.TemplateResponse(request, "statement.html", {
         "s": stmt, "txns": txns, "totals": totals,
-        "warnings": json.loads(stmt["warnings"]), "notice": notice,
+        "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
+        "warnings": json.loads(stmt["warnings"]), "notice": notice, "error": error,
     })
 
 
@@ -257,11 +269,172 @@ def delete(statement_id: int):
 
 
 @app.get("/transactions", response_class=HTMLResponse)
-def all_transactions(request: Request):
+def all_transactions(request: Request, error: str | None = None, notice: str | None = None,
+                     uncategorized: int = 0):
     with db.connect() as conn:
+        where = "WHERE t.category IS NULL" if uncategorized else ""
         txns = conn.execute(
-            """SELECT t.*, a.issuer, a.last4 FROM txn t
-               JOIN account a ON a.id = t.account_id
-               ORDER BY t.txn_date DESC, t.id DESC"""
+            f"""SELECT t.*, a.issuer, a.last4 FROM txn t
+                JOIN account a ON a.id = t.account_id
+                {where}
+                ORDER BY t.txn_date DESC, t.id DESC"""
         ).fetchall()
-    return templates.TemplateResponse(request, "transactions.html", {"txns": txns})
+        stats = db.coverage(conn)
+    return templates.TemplateResponse(request, "transactions.html", {
+        "txns": txns, "stats": stats, "uncategorized_only": bool(uncategorized),
+        "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
+        "error": error, "notice": notice,
+    })
+
+
+def safe_back(back: str) -> str:
+    """Only ever redirect within this app.
+
+    The value comes from a form field, so it is user input even on a
+    single-user localhost app, and `//evil.example` is a same-looking path that
+    is not one.
+    """
+    return back if back.startswith("/") and not back.startswith("//") else "/transactions"
+
+
+@app.post("/transactions/{txn_id}/category")
+def recategorize(txn_id: int, category: str = Form(""), flow_type: str = Form("spend"),
+                 apply_all: str = Form(""), back: str = Form("/transactions")):
+    """One row's category and flow, and optionally every row like it (§3)."""
+    target = safe_back(back)
+    if category and category not in categorize.CATEGORIES:
+        return RedirectResponse(f"{target}?error=Unknown+category", status_code=303)
+    if flow_type not in categorize.FLOW_TYPES:
+        return RedirectResponse(f"{target}?error=Unknown+flow+type", status_code=303)
+
+    with db.connect() as conn:
+        changed, merchant = db.set_category(
+            conn, txn_id, category or None, flow_type, bool(apply_all))
+        if not changed:
+            return RedirectResponse(f"{target}?error=No+such+transaction", status_code=303)
+        # The memory entry moved, so anything resolving through it re-resolves.
+        db.recategorize_all(conn)
+        conn.commit()
+
+    others = changed - 1
+    note = f"Categorized{f' and applied to {others} matching row(s)' if others else ''}"
+    return RedirectResponse(f"{target}?notice={note.replace(' ', '+')}#t{txn_id}",
+                            status_code=303)
+
+
+@app.get("/merchants", response_class=HTMLResponse)
+def merchant_sweep(request: Request, all: int = 0,
+                   error: str | None = None, notice: str | None = None):
+    """Categorize by merchant instead of by transaction.
+
+    The fastest route to a complete report, and it needs no model: the rows that
+    are uncategorized are far fewer merchants than they look, so one decision
+    here settles every past and future transaction from that merchant at once.
+    """
+    with db.connect() as conn:
+        entries = db.merchant_summary(conn, unknown_only=not all)
+        stats = db.coverage(conn)
+    return templates.TemplateResponse(request, "merchants.html", {
+        "entries": entries, "stats": stats, "show_all": bool(all),
+        "categories": categorize.CATEGORIES,
+        "unknown_value_minor": sum(e["value_minor"] or 0 for e in entries if e["unknown"]),
+        "error": error, "notice": notice,
+    })
+
+
+@app.post("/merchants")
+def save_merchant_categories(key: list[str] = Form(default=[]),
+                             category: list[str] = Form(default=[]),
+                             all: int = Form(0)):
+    """Apply a whole screen of merchant decisions at once.
+
+    The two lists arrive index-matched because every row emits exactly one
+    hidden `key` and one `category`, in document order. Blank categories mean
+    "left alone" and are dropped here rather than being written as nulls.
+    """
+    pairs = [(k, c) for k, c in zip(key, category) if k and c]
+    unknown = sorted({c for _, c in pairs if c not in categorize.CATEGORIES})
+    if unknown:
+        return RedirectResponse("/merchants?error=Unknown+category", status_code=303)
+    if not pairs:
+        return RedirectResponse("/merchants?notice=Nothing+to+save", status_code=303)
+
+    with db.connect() as conn:
+        for merchant, chosen in pairs:
+            db.remember(conn, merchant, chosen)
+        # Resolution runs through the one existing path, so a merchant decided
+        # here behaves exactly like one decided from a transaction row.
+        moved = db.recategorize_all(conn)
+        conn.commit()
+
+    note = f"{len(pairs)} merchant(s) saved, {moved} transaction(s) categorized"
+    return RedirectResponse(
+        f"/merchants{'?all=1&' if all else '?'}notice={note.replace(' ', '+')}",
+        status_code=303)
+
+
+@app.get("/rules", response_class=HTMLResponse)
+def rules(request: Request, error: str | None = None, notice: str | None = None):
+    with db.connect() as conn:
+        return templates.TemplateResponse(request, "rules.html", {
+            "rules": db.merchant_rules(conn),
+            "memory": db.list_memory(conn),
+            "stats": db.coverage(conn),
+            "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
+            "error": error, "notice": notice,
+        })
+
+
+@app.post("/rules")
+def add_rule(pattern: str = Form(""), match_type: str = Form("contains"),
+             category: str = Form(""), flow_type: str = Form(""),
+             priority: int = Form(0)):
+    pattern = pattern.strip()
+    if not pattern:
+        return RedirectResponse("/rules?error=A+rule+needs+a+pattern", status_code=303)
+    if match_type not in ("exact", "contains", "regex"):
+        return RedirectResponse("/rules?error=Unknown+match+type", status_code=303)
+    if not category and not flow_type:
+        return RedirectResponse(
+            "/rules?error=A+rule+must+set+a+category+or+a+flow+type", status_code=303)
+    if category and category not in categorize.CATEGORIES:
+        return RedirectResponse("/rules?error=Unknown+category", status_code=303)
+    if flow_type and flow_type not in categorize.FLOW_TYPES:
+        return RedirectResponse("/rules?error=Unknown+flow+type", status_code=303)
+    # A regex that does not compile would match nothing and say nothing about
+    # why, which is the kind of silent no-op this app keeps refusing to ship.
+    if match_type == "regex" and not categorize.valid_regex(pattern):
+        return RedirectResponse("/rules?error=That+is+not+a+valid+regex", status_code=303)
+
+    with db.connect() as conn:
+        db.add_rule(conn, pattern, match_type, category, flow_type, priority)
+        moved = db.recategorize_all(conn)
+        conn.commit()
+    return RedirectResponse(f"/rules?notice=Rule+added,+{moved}+row(s)+changed",
+                            status_code=303)
+
+
+@app.post("/rules/{rule_id}/delete")
+def remove_rule(rule_id: int):
+    with db.connect() as conn:
+        db.delete_rule(conn, rule_id)
+        moved = db.recategorize_all(conn)
+        conn.commit()
+    return RedirectResponse(f"/rules?notice=Rule+deleted,+{moved}+row(s)+changed",
+                            status_code=303)
+
+
+@app.post("/memory/forget")
+def forget(merchant: str = Form("")):
+    """Drop one learned merchant, seeded or taught.
+
+    Worth having because a seeded guess is the app's opinion, not the user's,
+    and there has to be a way to say "you were wrong about this one" that is
+    not recategorizing every row by hand.
+    """
+    with db.connect() as conn:
+        db.forget_merchant(conn, merchant)
+        moved = db.recategorize_all(conn)
+        conn.commit()
+    return RedirectResponse(f"/rules?notice=Forgotten,+{moved}+row(s)+changed",
+                            status_code=303)

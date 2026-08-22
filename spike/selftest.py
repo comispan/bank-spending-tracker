@@ -9,6 +9,7 @@ of the exercise).
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import tempfile
@@ -491,6 +492,262 @@ def test_merchant_normalization() -> None:
     drift = [s for s in inputs if key(key(s)) != key(s)]
     check("normalizing a key leaves it alone", not drift, repr(drift))
 
+    # Ordering for the bulk-categorize screen. Sorting purely by value scatters
+    # the two halves of a split merchant across the page — the corpus has one
+    # sitting under both `… ab cd` and `… ab-cd`, nine rows and one — so groups
+    # are ordered by their combined weight and kept together inside.
+    entries = [{"key": "acme mart ab cd", "weight": 900},
+               {"key": "zenith fuel", "weight": 800},
+               {"key": "acme mart ab-cd", "weight": 100},
+               {"key": "beta cafe", "weight": 50}]
+    order = [e["key"] for e in merchants.cluster_order(entries)]
+    check("split spellings of one merchant are listed together",
+          order.index("acme mart ab-cd") == order.index("acme mart ab cd") + 1, repr(order))
+    check("groups still lead with the money", order[0].startswith("acme"), repr(order))
+    check("a bigger single merchant outranks a smaller group",
+          order.index("zenith fuel") < order.index("beta cafe"), repr(order))
+    # Grouping is for the eye only. Merging them would be the eager root
+    # collapse normalize() refuses, and would file two different shops as one.
+    check("clustering does not merge or drop anything",
+          sorted(order) == sorted(e["key"] for e in entries), repr(order))
+
+
+def test_flow_type() -> None:
+    """Whether a row is spending at all (DESIGN.md §3).
+
+    The bias is toward `spend` throughout. A row wrongly left as spend is
+    visible in the total and one click from being fixed; a row wrongly excluded
+    is money that silently vanishes from the report, and a total that is quietly
+    too low looks exactly like a frugal month.
+    """
+    print("\nflow type")
+    import categorize
+
+    def flow(desc, direction="debit"):
+        return categorize.default_flow(desc, direction)
+
+    # The rows §4 is about: a card payment appears on the card statement *and*
+    # on the bank statement that paid it. Counted as spend, it double-counts.
+    check("a card payment is a transfer", flow("PAYMENT - THANK YOU", "credit") == "transfer",
+          flow("PAYMENT - THANK YOU", "credit"))
+    check("UOB's spelling too", flow("CCRD-Credit Card Payment", "credit") == "transfer",
+          flow("CCRD-Credit Card Payment", "credit"))
+    check("DBS's spelling too", flow("PAYMENT RECEIVED VIA FAST", "credit") == "transfer",
+          flow("PAYMENT RECEIVED VIA FAST", "credit"))
+    check("a balance transfer is not spending",
+          flow("BALANCE TRANSFER INSTALMENT", "debit") == "transfer",
+          flow("BALANCE TRANSFER INSTALMENT", "debit"))
+
+    # Order matters: `LATE PAYMENT CHARGE` contains the word payment, and fees
+    # are tested first for exactly this reason.
+    check("a late payment charge is a fee, not a payment",
+          flow("LATE PAYMENT CHARGE") == "fee", flow("LATE PAYMENT CHARGE"))
+    check("interest is a fee", flow("INTEREST CHARGE ON PURCHASES") == "fee",
+          flow("INTEREST CHARGE ON PURCHASES"))
+    check("an annual fee is a fee", flow("ANNUAL FEE") == "fee", flow("ANNUAL FEE"))
+
+    # Direction disambiguates the words that mean opposite things on each side.
+    check("a credit with refund wording is a refund",
+          flow("UNIQLO ION ORCHARD - REFUND", "credit") == "refund",
+          flow("UNIQLO ION ORCHARD - REFUND", "credit"))
+    check("the same wording on a debit is not",
+          flow("REFUND SPECIALISTS PTE LTD", "debit") == "spend",
+          flow("REFUND SPECIALISTS PTE LTD", "debit"))
+    check("cashback is income", flow("CASHBACK CREDIT", "credit") == "income",
+          flow("CASHBACK CREDIT", "credit"))
+
+    # The conservative half of the rule: ambiguous rows stay spending.
+    check("a GIRO bill is still spending", flow("GIRO PAYMENT TO SP SERVICES") == "spend",
+          flow("GIRO PAYMENT TO SP SERVICES"))
+    check("a PayNow to a shop is still spending", flow("PAYNOW TO HAWKER STALL") == "spend",
+          flow("PAYNOW TO HAWKER STALL"))
+    check("topping up a transit card is still spending",
+          flow("EZ-LINK TOP UP 118") == "spend", flow("EZ-LINK TOP UP 118"))
+    check("an ordinary purchase is spend", flow("FAIRPRICE FINEST 203") == "spend",
+          flow("FAIRPRICE FINEST 203"))
+
+    # An unrecognized credit leaves the spend total alone rather than netting
+    # against it. Understating spending is the worse error here.
+    check("an unknown credit does not net against spending",
+          flow("SOME CREDIT WE DO NOT KNOW", "credit") == "income",
+          flow("SOME CREDIT WE DO NOT KNOW", "credit"))
+
+
+def test_resolution_order() -> None:
+    """Tiers 1 and 2, and what happens when neither knows (DESIGN.md §3)."""
+    print("\ncategory resolution")
+    import categorize
+    import merchants
+
+    def rule(pattern, category=None, flow_type=None, match_type="contains"):
+        return {"pattern": pattern, "match_type": match_type,
+                "category": category, "flow_type": flow_type}
+
+    memory = {"grab": {"category": "Transport", "source": "memory"},
+              "grab trip": {"category": "Travel", "source": "memory"},
+              "fairprice": {"category": "Groceries", "source": "seed"}}
+
+    def resolve(desc, merchant, direction="debit", rules=()):
+        return categorize.resolve(desc, merchant, direction, list(rules), memory)
+
+    check("nothing known is an honest gap, not Other",
+          resolve("WHO KNOWS PTE LTD", "who knows") == (None, "spend", None),
+          repr(resolve("WHO KNOWS PTE LTD", "who knows")))
+
+    check("memory answers on the exact key",
+          resolve("GRAB *TRIP 4821", "grab")[:2] == ("Transport", "spend"),
+          repr(resolve("GRAB *TRIP 4821", "grab")))
+
+    # The precise key wins over its own root, or teaching the app about one
+    # outlet would be overruled by whatever the root happens to say.
+    check("the exact key beats the root",
+          resolve("Grab Trip SG", "grab trip")[0] == "Travel",
+          repr(resolve("Grab Trip SG", "grab trip")))
+
+    # ...and the root is the fallback that reunites spellings normalization
+    # cannot merge on its own.
+    check("the root answers when the exact key is unknown",
+          resolve("FAIRPRICE FINEST 203", "fairprice finest")[0] == "Groceries",
+          repr(resolve("FAIRPRICE FINEST 203", "fairprice finest")))
+
+    check("a seeded answer says it is a seed",
+          resolve("FAIRPRICE FINEST 203", "fairprice finest")[2] == "seed",
+          repr(resolve("FAIRPRICE FINEST 203", "fairprice finest")))
+
+    # Tier 1 always wins. That is the entire point of it being tier 1.
+    check("a rule beats memory",
+          resolve("GRAB *TRIP 4821", "grab", rules=[rule("grab", "Travel")])[0] == "Travel",
+          repr(resolve("GRAB *TRIP 4821", "grab", rules=[rule("grab", "Travel")])))
+
+    # Rules arrive already ordered by priority; the first match wins.
+    ordered = [rule("grab", "Dining"), rule("grab", "Travel")]
+    check("the first matching rule wins",
+          resolve("GRAB *TRIP", "grab", rules=ordered)[0] == "Dining",
+          repr(resolve("GRAB *TRIP", "grab", rules=ordered)))
+
+    # The two axes stay independent: a rule about what something *is* must not
+    # silently decide whether it was a purchase or a refund.
+    check("a rule with no flow leaves the derived flow alone",
+          resolve("GRAB REFUND", "grab", "credit", [rule("grab", "Transport")])[1] == "refund",
+          repr(resolve("GRAB REFUND", "grab", "credit", [rule("grab", "Transport")])))
+    check("a rule that sets a flow overrides it",
+          resolve("SOMETHING", "something", "debit",
+                  [rule("something", "Other", "transfer")])[1] == "transfer",
+          repr(resolve("SOMETHING", "something", "debit",
+                       [rule("something", "Other", "transfer")])))
+
+    # A row that is not spending needs no merchant lookup — the flow already
+    # answered the category question.
+    check("a card payment categorizes itself",
+          resolve("PAYMENT - THANK YOU", "payment thank you", "credit")
+          == ("Cash & Transfers", "transfer", "flow"),
+          repr(resolve("PAYMENT - THANK YOU", "payment thank you", "credit")))
+    check("a fee categorizes itself",
+          resolve("INTEREST CHARGE", "interest charge")[0] == "Fees & Interest",
+          repr(resolve("INTEREST CHARGE", "interest charge")))
+
+    # ...but a refund does not, because §3 nets it against the original
+    # merchant, and normalization already keyed it to that merchant.
+    refund = resolve("GRAB *TRIP - REFUND", "grab", "credit")
+    check("a refund keeps the merchant's category", refund[:2] == ("Transport", "refund"),
+          repr(refund))
+
+    # A rule the user broke must fail closed, not take the page down.
+    check("an uncompilable regex rule matches nothing",
+          resolve("ANYTHING", "anything", rules=[rule("[unclosed", "Other", None, "regex")])
+          == (None, "spend", None),
+          repr(resolve("ANYTHING", "anything", rules=[rule("[unclosed", "Other", None, "regex")])))
+    check("valid_regex rejects it up front", not categorize.valid_regex("[unclosed"))
+    check("valid_regex accepts a real one", categorize.valid_regex(r"^bus/mrt\b"))
+
+    # Every seeded key has to survive normalization unchanged, or it can never
+    # be looked up and the whole seed list is dead weight that looks alive.
+    unreachable = [k for k in categorize.SEED_MEMORY if merchants.normalize(k) != k]
+    check("every seeded key is a key normalize() can produce", not unreachable,
+          repr(unreachable[:6]))
+    unknown = sorted({c for c in categorize.SEED_MEMORY.values()
+                      if c not in categorize.CATEGORIES})
+    check("every seeded category is one of the thirteen", not unknown, repr(unknown))
+    check("every flow implies a category or is deliberately absent",
+          set(categorize.CATEGORY_FOR_FLOW) == {"transfer", "fee", "income"},
+          repr(sorted(categorize.CATEGORY_FOR_FLOW)))
+
+
+def test_tier3_gate() -> None:
+    """The contract a tier-3 response must pass before anything is stored.
+
+    Phase 0's finding was that a small model fails *silently* — it returns
+    something well-formed and empty rather than an error. Every check here is a
+    way that can happen, and the gate has to be all-or-nothing about it: a
+    response that dropped nine merchants is not "mostly fine", it is a response
+    you cannot reason about. Same argument as §2.3 refusing to half-trust an
+    extraction.
+    """
+    print("\ntier 3 gate")
+    import eval_categories as ev
+
+    asked = ["grab", "bus/mrt", "fairprice"]
+
+    def response(pairs):
+        return json.dumps({"assignments": [{"merchant": m, "category": c} for m, c in pairs]})
+
+    ok, problems, answers = ev.gate(
+        response([("grab", "Transport"), ("bus/mrt", "Transport"),
+                  ("fairprice", "Groceries")]), asked)
+    check("a complete, well-formed answer passes", ok and len(answers) == 3, repr(problems))
+
+    # The Phase 0 failure, exactly: valid JSON, correct shape, nothing in it.
+    ok, problems, _ = ev.gate('{"assignments": []}', asked)
+    check("an empty answer FAILS rather than looking like a clean run",
+          not ok and any("dropped" in p for p in problems), repr(problems))
+
+    ok, problems, _ = ev.gate("I think grab is Transport!", asked)
+    check("prose instead of JSON fails", not ok, repr(problems))
+
+    ok, problems, _ = ev.gate('{"results": []}', asked)
+    check("the right JSON with the wrong shape fails", not ok, repr(problems))
+
+    ok, problems, _ = ev.gate(response([("grab", "Transport"), ("bus/mrt", "Transport")]), asked)
+    check("one merchant quietly dropped fails",
+          not ok and any("dropped" in p for p in problems), repr(problems))
+
+    ok, problems, _ = ev.gate(
+        response([(m, "Transport") for m in asked] + [("netflix", "Entertainment")]), asked)
+    check("a merchant it was never asked about fails",
+          not ok and any("invented" in p for p in problems), repr(problems))
+
+    ok, problems, _ = ev.gate(
+        response([("grab", "Transport"), ("bus/mrt", "Transport"),
+                  ("fairprice", "Food & Drink")]), asked)
+    check("a category outside the fixed thirteen fails",
+          not ok and any("outside" in p for p in problems), repr(problems))
+
+    ok, problems, _ = ev.gate(
+        response([("grab", "Transport"), ("grab", "Dining"),
+                  ("bus/mrt", "Transport"), ("fairprice", "Groceries")]), asked)
+    check("answering one merchant twice fails",
+          not ok and any("more than once" in p for p in problems), repr(problems))
+
+    # Abstaining is a legal answer and must not be mistaken for a wrong one.
+    # A row that stays uncategorized is honest; a confident wrong guess is
+    # stored and silently mislabels the spending.
+    ok, _problems, answers = ev.gate(
+        response([("grab", "Transport"), ("bus/mrt", ev.ABSTAIN),
+                  ("fairprice", "Groceries")]), asked)
+    truth = {"grab": "Transport", "bus/mrt": "Transport", "fairprice": "Groceries"}
+    s = ev.score(answers, truth)
+    check("'unknown' passes the gate", ok, repr(_problems))
+    check("...and scores as an abstention, not as wrong",
+          (s["correct"], s["wrong"], s["abstained"]) == (2, 0, 1), repr(s))
+
+    # A disagreement is counted as wrong even though it is a real category —
+    # that is the number that decides whether tier 3 can be trusted to write.
+    _ok, _p, answers = ev.gate(
+        response([("grab", "Dining"), ("bus/mrt", "Transport"),
+                  ("fairprice", "Groceries")]), asked)
+    s = ev.score(answers, truth)
+    check("a plausible-but-different answer counts as wrong", s["wrong"] == 1, repr(s))
+
 
 def test_cli_runs() -> None:
     """Actually invoke the CLI.
@@ -601,6 +858,9 @@ if __name__ == "__main__":
     test_row_detection()
     test_row_parsing()
     test_merchant_normalization()
+    test_flow_type()
+    test_resolution_order()
+    test_tier3_gate()
     test_cli_runs()
     test_reconciliation()
     test_sanity_checks()

@@ -127,6 +127,34 @@ def merchant_root(key: str) -> str:
     return key.split(" ", 1)[0] if key else ""
 
 
+def cluster_order(entries: list[dict], weight: str = "weight") -> list[dict]:
+    """Order merchant summaries so variants of one merchant sit next to each other.
+
+    Sorting a bulk-categorize list purely by value scatters the two halves of a
+    split merchant across the page — the corpus has one merchant sitting under
+    both `… ab cd` and `… ab-cd`, nine rows and one, and by value they land
+    nowhere near each other. Grouping by root puts them adjacent, and ordering
+    the groups by their *combined* weight still leads with the money.
+
+    Note what this deliberately does not do: it groups for display only. Merging
+    the two keys would be the eager root-collapse that `normalize()` refuses,
+    and would file `royal plaza` and `royal sporting house` as one merchant.
+    Sitting next to each other is enough — the person reading can see they are
+    the same shop, which is exactly the judgement a machine should not make here.
+    """
+    totals: dict[str, float] = {}
+    for e in entries:
+        root = merchant_root(e["key"])
+        totals[root] = totals.get(root, 0) + (e.get(weight) or 0)
+    return sorted(
+        entries,
+        key=lambda e: (-totals[merchant_root(e["key"])],
+                       merchant_root(e["key"]),
+                       -(e.get(weight) or 0),
+                       e["key"]),
+    )
+
+
 # ------------------------------------------------------------------ pieces
 
 def _resolve_star(text: str) -> str:

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Categorize merchants{% endblock %}
+{% block content %}
+
+<h1>Categorize merchants</h1>
+<p class="hint">
+  One decision per merchant, not per transaction — that is the whole point of
+  this screen. Each choice is written to merchant memory, so it settles every
+  past row from that merchant and every future one too. Leave a row blank to
+  skip it; nothing is changed until you save.
+</p>
+
+{% if stats.total %}
+<section class="coverage">
+  <p>
+    <strong>{{ stats.categorized }} of {{ stats.total }}</strong> transactions
+    categorized ({{ (100 * stats.categorized / stats.total) | round | int }}%)
+    {% if not show_all %}
+      · <strong>{{ entries|length }}</strong> merchant(s) left to decide,
+      worth <strong>{{ unknown_value_minor | money }}</strong> of spending
+    {% endif %}
+  </p>
+  <p class="tiers">
+    {% if show_all %}
+      <a href="/merchants">show only the undecided</a>
+    {% else %}
+      <a href="/merchants?all=1">show every merchant, including ones already answered</a>
+    {% endif %}
+  </p>
+</section>
+{% endif %}
+
+{% if not entries %}
+  <p class="empty">
+    {% if show_all %}Nothing parsed yet. <a href="/">Upload a statement.</a>
+    {% else %}Every merchant is categorized. <a href="/merchants?all=1">Show them all.</a>
+    {% endif %}
+  </p>
+{% else %}
+<form method="post" action="/merchants" id="merchant-form">
+  <input type="hidden" name="all" value="{{ 1 if show_all else 0 }}">
+  <p class="sticky-save">
+    <button type="submit">Save all</button>
+    <span class="hint">
+      Merchants that share a first word are listed together — they are often one
+      shop the statement spells two ways. They are never merged for you.
+    </span>
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Merchant key</th><th>Example line</th>
+        <th class="num">Rows</th><th class="num">Spend</th><th>Seen</th>
+        <th>Category</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for e in entries %}
+      <tr>
+        <td>
+          <code>{{ e.key }}</code>
+          {% if e.unknown and e.unknown != e.rows_total %}
+            <span class="merchant">{{ e.unknown }} of {{ e.rows_total }} still unknown</span>
+          {% endif %}
+        </td>
+        <td class="muted example">{{ e.example }}</td>
+        <td class="num">{{ e.rows_total }}</td>
+        <td class="num">{{ e.value_minor | money }}</td>
+        <td class="date muted">
+          {{ e.first_seen }}{% if e.last_seen != e.first_seen %} → {{ e.last_seen }}{% endif %}
+        </td>
+        <td>
+          <input type="hidden" name="key" value="{{ e.key }}">
+          <select name="category" aria-label="Category for {{ e.key }}">
+            <option value="">— leave alone —</option>
+            {% for c in categories %}
+              <option value="{{ c }}"{% if e.current_category == c %} selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+          {% if e.memory_source %}
+            <span class="src {{ e.memory_source }}">{{ e.memory_source }}</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="sticky-save"><button type="submit">Save all</button></p>
+</form>
+
+<p class="hint">
+  This screen sets categories only. Whether a row was a purchase, a refund or a
+  transfer is a property of the row rather than of the merchant, so it stays on
+  the transaction — or write a <a href="/rules">rule</a> if a merchant is always
+  one kind of movement.
+</p>
+{% endif %}
+
+{% endblock %}

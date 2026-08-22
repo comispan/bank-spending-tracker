@@ -143,6 +143,40 @@ Three tiers, cheapest first. Each transaction is resolved by the first tier that
 
 Any time a user recategorizes a transaction, write the mapping back into tier 2 **and offer to apply it to all past and future matches**. This is the loop that makes the app feel smart by month three.
 
+> **Tiers 1 and 2 built 2026-08-22** as `app/categorize.py`, pure functions with
+> no database and no network so the resolution order is testable the way
+> `rows.py` is. Tier 3 is not built and the app is complete without it: an
+> unknown merchant resolves to *nothing* and is counted as unknown on the
+> transactions page, rather than being filed under `Other` where the gap would
+> look answered. That is also the shape tier 3 slots into — it fills the
+> `None`s and touches nothing else.
+>
+> Three things came out differently from the sketch above, each for a reason:
+>
+> - **"Apply to all matching" also decides whether the choice is remembered.**
+>   "Write it back to tier 2" and "offer to apply it to past matches" cannot be
+>   independent switches: memory feeds the re-resolution pass, so anything
+>   written reaches the past rows on the next boot whatever the checkbox said.
+>   One switch that means what it appears to mean beats two where one is a lie.
+> - **`category_source` gained `seed` and `flow`** beyond §5's
+>   `rule|memory|llm|user`. A shipped guess and a decision the user made are
+>   different claims and the UI renders them differently; `flow` marks the rows
+>   that need no merchant lookup at all. Both are visible on every row, because
+>   a UI that renders a guess identically to a decision is asking to be trusted
+>   more than it has earned.
+> - **`merchant_memory` carries no `flow_type`**, matching §5 and not the
+>   `merchant_rule` row above it. A category is a property of the merchant;
+>   whether a given row was a purchase or a refund is a property of the row.
+>   Learning "Uniqlo is Shopping" must not declare every future Uniqlo refund to
+>   be spending.
+>
+> The flow classifier is deliberately biased toward `spend`: ambiguous rows — a
+> GIRO that might be a bill or might be a card payment, a PayNow that might be
+> lunch — stay spending. A row wrongly left in the total is visible and one
+> click from fixed; a row wrongly excluded is money that vanishes from the
+> report, and a total that is quietly too low looks exactly like a frugal month.
+> This is §2.3's argument applied to the second half of the app.
+
 **Category set** — keep it small and fixed in v1; a huge taxonomy makes both the LLM and the user worse at choosing:
 
 `Groceries · Dining · Transport · Shopping · Bills & Utilities · Health · Entertainment · Travel · Education · Fees & Interest · Cash & Transfers · Income/Refunds · Other`
@@ -265,8 +299,20 @@ Smaller than originally planned, because Phase 0 removed the queue, the worker, 
 5. Needs-review screen: parsed rows beside the source page. This is where a `fail` or `unverified` gets resolved, and Phase 0 proved you will use it.
 6. Dedup on `file_sha256` at minimum — re-uploading the same PDF must be caught. Full transaction-level dedup can wait for Phase 3, but note that UOB already has two genuinely identical same-day rows, so **never dedup silently within a single statement**.
 
-**Phase 2 — Categorization (~1 week).**
-Three-tier resolver, merchant normalization, inline recategorize with "apply to all matching." Seed merchant memory with a few hundred common merchants.
+**Phase 2 — Categorization (~1 week). Tiers 1 and 2 done 2026-08-22.**
+Merchant normalization, the `flow_type` axis, tiers 1 and 2, inline recategorize with "apply to all matching", and a rules & memory page. Seeded with ~100 common merchants, stored as `seed` so a shipped guess is never mistaken for the user's own decision.
+
+**Still open: tier 3**, and with it §9.4 — the only question in this app about anything leaving the machine. On the corpus as it stands, the free tiers answer about a third of rows cold, before the user has taught it anything; that number is on the transactions page and is the honest measure of how much work tier 3 actually has.
+
+> **What the gap actually is, measured 2026-08-22.** The 103 uncategorized rows are **43 merchants**, five of which account for 59 rows. But they carry **91% of the spending by value** — the seeds cover a lot of small repeating charges and almost none of the money, so a monthly report built today would be describing 9% of the spending. Clearing this is a prerequisite for Phase 3, not a tidying task.
+>
+> That reshapes what tier 3 is *for*. A screen that categorizes by merchant instead of by row clears the whole backlog in minutes at full accuracy, and a model would have to be checked on all 43 anyway to find out which of its answers were wrong. So the backlog is a UI problem, and tier 3's real job is **the next statement** — the handful of merchants that arrive each month. Built as `/merchants` in the same pass; two decisions on that screen moved 44 rows and took coverage from 36% to 63%.
+>
+> It also produces the thing that makes tier 3 gradeable: a set of merchant keys the user labelled by hand. Run a candidate model over those with the labels hidden and the disagreements are a real accuracy number — the same discipline as §2.3, which is that a component nobody can grade does not ship.
+>
+> **The grader exists: `spike/eval_categories.py` (2026-08-22).** It scores a candidate against those hand-labelled merchants and enforces the exact contract tier 3 would — no invented merchants, none dropped, every category inside the fixed thirteen — so a model that is accurate but cannot hold a format is reported as unusable rather than promising. `unknown` is a legal answer and is scored as an abstention, not as an error: a row left uncategorized is honest, a confident wrong answer is stored and mislabels the spending.
+>
+> Two numbers from it already shape the decision. **The eval set's most common category alone scores 53%** — that is the floor any model has to clear, and it is high because real spending is lopsided. And **a full second month across all five cards leaves 34 merchants (39 rows, 24% of spend) for tier 3**, of which 30 are one-offs — so this is a permanent monthly cost that merchant memory cannot learn away, which is the actual argument for building tier 3 at all.
 
 **Phase 3 — Consolidation & report (~1 week).**
 Multiple accounts, dedup, calendar-month bucketing, the monthly report page with drill-through. This is the point where the app becomes the thing you described.

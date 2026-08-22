@@ -50,7 +50,10 @@ header {
 nav a { color: var(--muted); text-decoration: none; margin-right: 1rem; }
 nav a:hover { color: var(--accent); }
 
-main { max-width: 1100px; margin: 0 auto; padding: 1.75rem 1.5rem 4rem; }
+/* The tables are wider than a phone and the category column made them wider
+   still. Scroll them inside the page rather than scrolling the page itself,
+   which otherwise drags the header sideways with it. */
+main { max-width: 1100px; margin: 0 auto; padding: 1.75rem 1.5rem 4rem; overflow-x: auto; }
 
 h1 { font-size: 1.4rem; margin: 0 0 .75rem; letter-spacing: -0.01em; }
 h2 { font-size: 1.05rem; margin: 2rem 0 .6rem; letter-spacing: -0.005em; }
@@ -139,6 +142,70 @@ table.compact td, table.compact th { padding: .35rem .5rem; font-size: .85rem; }
 .links { font-size: .88rem; color: var(--muted); }
 
 .dir { font-size: .72rem; color: var(--muted); }
+
+/* ------------------------------------------------ categorization (Phase 2) */
+
+.catform { display: flex; align-items: center; gap: .3rem; flex-wrap: wrap; }
+.catform select {
+  padding: .25rem .35rem; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink); font: inherit; font-size: .8rem;
+  max-width: 11rem;
+}
+/* A row that is not spending should read differently at a glance, or a
+   mis-flagged transfer sits in the table looking exactly like a purchase. */
+.catform select.flow { max-width: 6.5rem; color: var(--muted); }
+.catform select.flow.spend { color: var(--ink); }
+.catform select.flow.transfer, .catform select.flow.fee { color: var(--warn); }
+.catform select.flow.refund, .catform select.flow.income { color: var(--pass); }
+.applyall { font-size: .72rem; color: var(--muted); white-space: nowrap; }
+button.tiny { padding: .2rem .5rem; font-size: .72rem; font-weight: 500; }
+
+/* Which tier answered. Shown on every categorized row on purpose: a category
+   the app guessed and one the user chose are different claims, and a UI that
+   renders them identically is quietly asking to be trusted more than it has
+   earned. `seed` is styled as a warning for that reason. */
+.src {
+  display: inline-block; padding: 0 .35rem; border-radius: 4px;
+  font-size: .65rem; letter-spacing: .03em; text-transform: uppercase;
+  font-family: var(--mono); border: 1px solid var(--line); color: var(--muted);
+}
+.src.user { background: var(--pass-bg); color: var(--pass); border-color: transparent; }
+.src.rule { background: var(--pass-bg); color: var(--pass); border-color: transparent; }
+.src.memory { background: transparent; color: var(--accent); }
+.src.seed { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.src.flow { background: transparent; color: var(--muted); }
+.src.none { background: var(--fail-bg); color: var(--fail); border-color: transparent; }
+
+.flowtag { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+.flowtag.transfer, .flowtag.fee { color: var(--warn); }
+.flowtag.refund, .flowtag.income { color: var(--pass); }
+
+.coverage { margin: 1rem 0 1.25rem; padding: .75rem .9rem;
+            background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.coverage p { margin: 0; font-size: .9rem; }
+.coverage .tiers { margin-top: .4rem; font-size: .8rem; color: var(--muted); }
+
+.rulesform { display: flex; gap: .45rem; flex-wrap: wrap; align-items: center;
+             margin-bottom: .5rem; }
+.rulesform input[type=text] { min-width: 14rem; }
+.rulesform input[type=number] { width: 4.5rem; }
+.rulesform input, .rulesform select {
+  padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--bg); color: var(--ink); font: inherit; font-size: .9rem;
+}
+td.actions form { display: inline; }
+
+/* The bulk merchant screen. The example line is the column that makes a key
+   recognizable — `bus/mrt` means nothing until you see the line it came from —
+   so it gets room, but not so much that the category select falls off screen. */
+.example { max-width: 26rem; font-size: .82rem; }
+.sticky-save { display: flex; align-items: baseline; gap: .9rem; flex-wrap: wrap;
+               margin: .9rem 0; }
+.sticky-save .hint { margin: 0; }
+#merchant-form select {
+  padding: .3rem .4rem; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink); font: inherit; font-size: .82rem;
+}
 td.credit { color: var(--pass); }
 
 .pager { display: flex; gap: .3rem; align-items: center; margin: 1rem 0; flex-wrap: wrap; }

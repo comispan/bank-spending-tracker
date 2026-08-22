@@ -1,25 +1,57 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% block title %}Transactions{% endblock %}
 {% block content %}
 
 <h1>{{ txns|length }} transactions</h1>
 <p class="hint">
-  Every card, newest first. Categories arrive in Phase 2 and the monthly report
-  in Phase 3 — this list is deliberately just the parsed rows. The small grey
-  line under a description is the merchant key the categorizer will learn
-  against; it is shown only where it differs from what the statement printed.
+  Every card, newest first. The small grey line under a description is the
+  merchant key the categorizer learns against; it is shown only where it
+  differs from what the statement printed. The monthly report arrives in
+  Phase 3 — this list is the rows themselves.
 </p>
 
+{% if stats.total %}
+<section class="coverage">
+  <p>
+    <strong>{{ stats.categorized }} of {{ stats.total }}</strong> categorized
+    ({{ (100 * stats.categorized / stats.total) | round | int }}%) ·
+    net spend <strong>{{ stats.spend_minor | money }}</strong>
+    <span class="muted">— transfers, fees and income excluded, refunds netted off</span>
+  </p>
+  <p class="tiers">
+    {% for src in ['rule', 'memory', 'seed', 'flow', 'user', 'none'] %}
+      {% if stats.by_source.get(src) %}
+        <span class="src {{ src }}">{{ src }}</span> {{ stats.by_source[src] }}
+      {% endif %}
+    {% endfor %}
+    {% if stats.by_source.get('none') %}
+      · <a href="/transactions?uncategorized=1">show only the {{ stats.by_source['none'] }} unknown</a>
+    {% endif %}
+    {% if uncategorized_only %} · <a href="/transactions">show all</a>{% endif %}
+  </p>
+</section>
+{% endif %}
+
 {% if not txns %}
-  <p class="empty">Nothing yet. <a href="/">Upload a statement.</a></p>
+  <p class="empty">
+    {% if uncategorized_only %}
+      Nothing uncategorized. <a href="/transactions">Show all.</a>
+    {% else %}
+      Nothing yet. <a href="/">Upload a statement.</a>
+    {% endif %}
+  </p>
 {% else %}
 <table>
   <thead>
-    <tr><th>Date</th><th>Account</th><th>Description</th><th class="num">Amount</th><th>Dir</th></tr>
+    <tr>
+      <th>Date</th><th>Account</th><th>Description</th>
+      <th class="num">Amount</th><th>Dir</th><th>Category</th>
+    </tr>
   </thead>
   <tbody>
   {% for t in txns %}
-    <tr>
+    <tr id="t{{ t.id }}">
       <td class="date">{{ t.txn_date }}</td>
       <td class="muted">{{ t.issuer }}{% if t.last4 %} ····{{ t.last4 }}{% endif %}</td>
       <td>{{ t.description_raw }}
@@ -29,6 +61,7 @@
       </td>
       <td class="num {{ t.direction }}">{{ t.amount_sgd_minor | money }}</td>
       <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
+      <td>{{ m.category_cell(t, categories, flow_types, '/transactions' + ('?uncategorized=1' if uncategorized_only else '')) }}</td>
     </tr>
   {% endfor %}
   </tbody>
