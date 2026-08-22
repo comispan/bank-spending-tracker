@@ -28,6 +28,7 @@ from fastapi.templating import Jinja2Templates
 sys.path.insert(0, str(Path(__file__).parent))
 
 import db          # noqa: E402
+import merchants   # noqa: E402
 import parsing     # noqa: E402
 
 HERE = Path(__file__).parent
@@ -41,6 +42,14 @@ templates = Jinja2Templates(directory=HERE / "templates")
 @app.on_event("startup")
 def startup() -> None:
     db.init()
+    # Merchant keys are derived, not entered, so a change to merchants.py is
+    # allowed to re-key what is already stored. A count, never a description —
+    # DESIGN.md §7 says don't log those.
+    with db.connect() as conn:
+        moved = db.renormalize_merchants(conn)
+        conn.commit()
+    if moved:
+        print(f"merchant keys recomputed for {moved} transaction(s)")
 
 
 def money(minor: int | None) -> str:
@@ -153,6 +162,10 @@ async def upload(file: UploadFile, password: str = Form("")):
                 "txn_date": t["date"],
                 "posted_date": t.get("posted_date"),
                 "description_raw": t["description"],
+                # The key tier 2 of the categorizer will look up (DESIGN.md §3).
+                # Stored rather than computed on read so a query can group by it,
+                # and recomputed on boot when the rules change.
+                "merchant_normalized": merchants.normalize(t["description"]),
                 "amount_minor": db.to_minor(t["amount"]),
                 "currency": currency,
                 # Statements bill in their own currency, so the printed amount

@@ -18,6 +18,7 @@ the uploaded PDFs — and is gitignored.
 |---|---|
 | `rows.py` | The parser. Moved here from the Phase 0 spike unchanged; it is the one component proven against real statements. |
 | `parsing.py` | PDF → verified transactions: decrypt, redact, parse, reconcile. |
+| `merchants.py` | Description → the merchant key the categorizer learns against. Phase 2, step 1. |
 | `db.py` | SQLite schema and queries. Money is integer minor units, never a float. |
 | `main.py` | FastAPI routes and the four pages. |
 
@@ -48,14 +49,29 @@ row is missing, the only useful question is what the parser was looking at, and
 a rendered image cannot answer it. The PDF is one click away for the times you
 want to see the original.
 
+**Merchant keys keep more than one word.** `uniqlo ion orchard` rather than
+`uniqlo`. A key only has to be the same next month and different from other
+merchants — that outlet does not move, so the longer key is stable, and cutting
+to one word would merge `royal plaza` with `royal sporting house`. Where one
+merchant does end up with two keys, `merchant_root()` — the first word — is the
+fallback that reunites them, and tier 2 will look up the precise key first and
+the root second.
+
+**Merchant keys are recomputed on every boot.** They are derived from
+`description_raw` by a pure function, so improving `merchants.py` re-keys the
+statements already uploaded instead of leaving them on the old rules. A normal
+boot moves zero rows and prints nothing; any other number means the rules just
+changed under data that may already be categorized.
+
 **`unverified` is a defect state, not a resting state.** It means the statement
 printed no totals to check against — which is indistinguishable from a parse
 that is simply wrong. Both real bugs found in Phase 0 were hiding under it.
 
 ## Not here yet
 
-Categories and merchant normalization (Phase 2), the cross-statement monthly
-report and transaction-level dedup (Phase 3), OCR for scanned statements
-(Phase 4). Foreign-currency sublines are parsed into the description but not yet
+The three-tier category resolver, `flow_type`, and the recategorize UI (the
+rest of Phase 2 — merchant keys are stored but nothing reads them yet), the
+cross-statement monthly report and transaction-level dedup (Phase 3), OCR for
+scanned statements (Phase 4). Foreign-currency sublines are parsed into the description but not yet
 split into `amount_minor` + `fx_rate`; the columns exist and DESIGN.md §4 says
 how they should be filled.

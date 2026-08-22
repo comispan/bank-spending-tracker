@@ -49,7 +49,11 @@
     <tr>
       <td class="date">{{ t.txn_date }}</td>
       <td class="date muted">{{ t.posted_date or "" }}</td>
-      <td>{{ t.description_raw }}</td>
+      <td>{{ t.description_raw }}
+        {% if t.merchant_normalized and t.merchant_normalized != t.description_raw|lower %}
+          <span class="merchant">{{ t.merchant_normalized }}</span>
+        {% endif %}
+      </td>
       <td class="num {{ t.direction }}">{{ t.amount_minor | money }}</td>
       <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
       <td class="num muted">{{ t.source_page or "" }}</td>

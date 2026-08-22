@@ -14,6 +14,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import merchants
+
 ROOT = Path(__file__).parent.parent
 DATA = ROOT / "data"
 DB_PATH = DATA / "app.db"
@@ -177,13 +179,38 @@ def insert_transactions(conn: sqlite3.Connection, statement_id: int, account_id:
                         rows: list[dict[str, Any]]) -> None:
     conn.executemany(
         """INSERT INTO txn (account_id, statement_id, txn_date, posted_date,
-                            description_raw, amount_minor, currency, amount_sgd_minor,
+                            description_raw, merchant_normalized,
+                            amount_minor, currency, amount_sgd_minor,
                             direction, source_page, reference, dedup_key)
            VALUES (:account_id, :statement_id, :txn_date, :posted_date,
-                   :description_raw, :amount_minor, :currency, :amount_sgd_minor,
+                   :description_raw, :merchant_normalized,
+                   :amount_minor, :currency, :amount_sgd_minor,
                    :direction, :source_page, :reference, :dedup_key)""",
         [dict(r, account_id=account_id, statement_id=statement_id) for r in rows],
     )
+
+
+def renormalize_merchants(conn: sqlite3.Connection) -> int:
+    """Recompute merchant_normalized wherever it no longer matches the parser.
+
+    A merchant key is a pure function of description_raw, so this is safe to
+    run on every boot: it is a few milliseconds over a few thousand rows, and
+    it means improving `merchants.py` re-keys the statements already uploaded
+    instead of leaving them on the old rules. Same argument as keeping
+    `raw_extraction` — deterministic work can always be replayed, so nothing
+    has to be re-uploaded to benefit from a fix.
+
+    Returns how many rows moved, which is the number worth showing: on a normal
+    boot it is 0, and anything else means the rules just changed under data
+    that was already categorized.
+    """
+    updates = []
+    for row in conn.execute("SELECT id, description_raw, merchant_normalized FROM txn"):
+        key = merchants.normalize(row["description_raw"])
+        if key != row["merchant_normalized"]:
+            updates.append((key, row["id"]))
+    conn.executemany("UPDATE txn SET merchant_normalized = ? WHERE id = ?", updates)
+    return len(updates)
 
 
 def delete_statement(conn: sqlite3.Connection, statement_id: int) -> str | None:

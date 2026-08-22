@@ -130,6 +130,17 @@ Three tiers, cheapest first. Each transaction is resolved by the first tier that
 
 **Merchant normalization** is what makes tier 2 work. `GRAB *TRIP 4821 SINGAPORE`, `GRAB* TRIP 9903`, and `Grab Trip SG` must all collapse to `grab`. Strip: trailing numerics, `*` segments, city/country suffixes, POS terminal IDs, dates embedded in the description, `SQ *`/`PAYPAL *`/`AMZN Mktp` style processor prefixes (keep what follows). Lowercase, squash whitespace. Store both `description_raw` and `merchant_normalized`.
 
+> **Built 2026-08-22** as `app/merchants.py`. The rule that generalized is *the merchant is at the front, and the junk starts somewhere*: cut at the first token that cannot be part of a name, then strip the place off what is left — in that order, because 62 rows of one statement end `… SINGAPORE 065` and the place is not last until the reference has been cut off it. Enumerating suffixes per issuer was not needed, for the same reason §2.2 parses rows by shape rather than by bank. On the real corpus: 195 distinct descriptions → 112 keys, none empty, and normalizing a key never moves it.
+>
+> **It produces two keys, and tier 2 must try both** — the precise key, then its first word:
+>
+> ```
+> normalize("STARBUCKS @ RAFFLES CITY SG")  ->  "starbucks raffles city"
+> merchant_root("starbucks raffles city")   ->  "starbucks"
+> ```
+>
+> This is the honest version of "all three collapse to `grab`" above. The two starred spellings do reach `grab` exactly; `Grab Trip SG` has no star to cut at and reaches `grab trip`, which meets the other two **at the root**. Reducing everything to one word eagerly would have closed that gap and silently merged `royal plaza` with `royal sporting house` — a learned category applied to a shop the user never categorized. A merchant split across two keys costs one extra click; two merchants merged into one key is wrong data, quietly. The root is also what absorbs the outlet-suffix and hyphen-vs-space variants the corpus turns out to be full of.
+
 Any time a user recategorizes a transaction, write the mapping back into tier 2 **and offer to apply it to all past and future matches**. This is the loop that makes the app feel smart by month three.
 
 **Category set** — keep it small and fixed in v1; a huge taxonomy makes both the LLM and the user worse at choosing:
