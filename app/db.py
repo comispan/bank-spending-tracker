@@ -17,6 +17,8 @@ from typing import Any
 
 import categorize
 import merchants
+import months
+import rows
 
 ROOT = Path(__file__).parent.parent
 DATA = ROOT / "data"
@@ -226,6 +228,29 @@ def insert_transactions(conn: sqlite3.Connection, statement_id: int, account_id:
                    :direction, :source_page, :reference, :dedup_key)""",
         [dict(r, account_id=account_id, statement_id=statement_id) for r in rows],
     )
+
+
+def backfill_periods(conn: sqlite3.Connection) -> int:
+    """Re-read the cycle dates of statements that reported none.
+
+    Only fills gaps — a period the parser already found is never overwritten,
+    so this cannot quietly move a statement that was right. Runs off the stored
+    `page_text` rather than the PDF, which is exactly what §5 keeps it for: the
+    extraction is deterministic, so improving the parser can be replayed over
+    what is already uploaded instead of asking for the files again.
+    """
+    updates = []
+    for row in conn.execute(
+        """SELECT id, page_text FROM statement
+           WHERE (period_start IS NULL OR period_end IS NULL) AND statement_date IS NULL"""
+    ):
+        ctx = rows.document_context(json.loads(row["page_text"] or "[]"))
+        if ctx.period[0] or ctx.statement_date:
+            updates.append((ctx.period[0], ctx.period[1], ctx.statement_date, row["id"]))
+    conn.executemany(
+        """UPDATE statement SET period_start = ?, period_end = ?, statement_date = ?
+           WHERE id = ?""", updates)
+    return len(updates)
 
 
 def renormalize_merchants(conn: sqlite3.Connection) -> int:
@@ -497,6 +522,143 @@ def coverage(conn: sqlite3.Connection) -> dict[str, Any]:
                                         WHEN flow_type = 'refund' THEN -amount_sgd_minor
                                    END), 0) AS n FROM txn"""
         ).fetchone()["n"],
+    }
+
+
+def coverage_by_account(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
+    """Merged covered windows per card, keyed by a human label."""
+    per_account: dict[str, list[dict[str, Any]]] = {}
+    for r in conn.execute(
+        """SELECT a.id, a.issuer, a.last4, s.period_start, s.period_end, s.statement_date,
+                  (SELECT MIN(txn_date) FROM txn WHERE statement_id = s.id) AS first_txn
+           FROM statement s JOIN account a ON a.id = s.account_id"""
+    ):
+        label = f'{r["issuer"]}{" ····" + r["last4"] if r["last4"] else ""}'
+        per_account.setdefault(label, []).append(dict(r))
+    return {label: months.statement_windows(rows_) for label, rows_ in per_account.items()}
+
+
+def month_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """One row per calendar month, bucketed by transaction date (§4).
+
+    Each month carries its own completeness, and a like-for-like figure: when a
+    month is only billed to the 14th, the honest comparison is against the
+    earlier month's first fourteen days, not against the whole of it.
+    """
+    coverage = coverage_by_account(conn)
+
+    totals = {
+        r["m"]: dict(r) for r in conn.execute(
+            """SELECT substr(txn_date, 1, 7) AS m, COUNT(*) AS rows_total,
+                      COALESCE(SUM(CASE WHEN flow_type = 'spend'  THEN amount_sgd_minor
+                                        WHEN flow_type = 'refund' THEN -amount_sgd_minor
+                                        ELSE 0 END), 0) AS spend_minor,
+                      SUM(CASE WHEN category IS NULL THEN 1 ELSE 0 END) AS uncategorized,
+                      COUNT(DISTINCT account_id) AS cards_seen
+               FROM txn GROUP BY 1 ORDER BY 1""")
+    }
+
+    def spend_in_days(ym: str, days: tuple[int, int] | None) -> int:
+        if days is None:
+            return conn.execute(
+                """SELECT COALESCE(SUM(CASE WHEN flow_type = 'spend'  THEN amount_sgd_minor
+                                            WHEN flow_type = 'refund' THEN -amount_sgd_minor
+                                            ELSE 0 END), 0) AS n
+                   FROM txn WHERE substr(txn_date, 1, 7) = ?""", (ym,)).fetchone()["n"]
+        return conn.execute(
+            """SELECT COALESCE(SUM(CASE WHEN flow_type = 'spend'  THEN amount_sgd_minor
+                                        WHEN flow_type = 'refund' THEN -amount_sgd_minor
+                                        ELSE 0 END), 0) AS n
+               FROM txn WHERE substr(txn_date, 1, 7) = ?
+                 AND CAST(substr(txn_date, 9, 2) AS INTEGER) BETWEEN ? AND ?""",
+            (ym, days[0], days[1])).fetchone()["n"]
+
+    out = []
+    for ym in sorted(totals):
+        status = months.month_completeness(ym, coverage)
+        days = months.comparable_days(status)
+        row = dict(totals[ym], **status)
+        row["comparable_days"] = days
+        row["spend_comparable"] = spend_in_days(ym, days)
+        out.append(row)
+
+    # Deltas last, and only where both sides are genuinely covered over the same
+    # days. The subtle failure this guards is not the obvious one: it is easy to
+    # remember that *this* month may be part-billed, and easy to forget that the
+    # month being compared against may be too. August 1-14 against July 1-14
+    # looks like a fair comparison and is not, because one card has no statement
+    # covering early July — the delta would flatter August by whatever that card
+    # spent. No number is better than a number that is wrong in an invisible
+    # direction, so the reason is carried instead and the report says which
+    # statement would fix it.
+    for i, row in enumerate(out):
+        prior = out[i - 1] if i else None
+        row["prior"] = prior["month"] if prior else None
+        row["prior_comparable"] = None
+        row["delta_minor"] = None
+        row["not_comparable"] = None
+
+        if not prior:
+            row["not_comparable"] = "nothing earlier to compare against"
+            continue
+        if not (row["is_complete"] or row["comparable_days"]):
+            row["not_comparable"] = "this month cannot be bounded"
+            continue
+
+        days = row["comparable_days"] or (1, 31)
+        prior_days = months.covered_day_range(prior)
+        if prior_days is None:
+            gap = ", ".join(prior["missing"] + prior["gaps"]) or "a card"
+            row["not_comparable"] = f"{prior['month']} has no statement covering it for {gap}"
+            continue
+        if not (prior_days[0] <= days[0] and days[1] <= prior_days[1]):
+            row["not_comparable"] = (
+                f"{prior['month']} is only billed for days "
+                f"{prior_days[0]}–{prior_days[1]}, so the same days cannot be compared")
+            continue
+
+        base = spend_in_days(prior["month"], row["comparable_days"])
+        row["prior_comparable"] = base
+        row["delta_minor"] = row["spend_comparable"] - base
+    return list(reversed(out))
+
+
+def month_detail(conn: sqlite3.Connection, ym: str) -> dict[str, Any]:
+    """Category, card and merchant breakdown for one calendar month."""
+    start, end = months.month_bounds(ym)
+    args = (start, end)
+
+    def rows_for(sql: str) -> list[sqlite3.Row]:
+        return conn.execute(sql, args).fetchall()
+
+    return {
+        "by_category": rows_for(
+            """SELECT COALESCE(t.category, '(uncategorized)') AS label, COUNT(*) AS n,
+                      COALESCE(SUM(CASE WHEN t.flow_type='spend' THEN t.amount_sgd_minor
+                                        WHEN t.flow_type='refund' THEN -t.amount_sgd_minor
+                                        ELSE 0 END), 0) AS v
+               FROM txn t WHERE t.txn_date BETWEEN ? AND ?
+               GROUP BY 1 ORDER BY v DESC"""),
+        "by_card": rows_for(
+            """SELECT a.issuer || CASE WHEN a.last4 IS NULL THEN '' ELSE ' ····' || a.last4 END
+                        AS label, COUNT(*) AS n,
+                      COALESCE(SUM(CASE WHEN t.flow_type='spend' THEN t.amount_sgd_minor
+                                        WHEN t.flow_type='refund' THEN -t.amount_sgd_minor
+                                        ELSE 0 END), 0) AS v
+               FROM txn t JOIN account a ON a.id = t.account_id
+               WHERE t.txn_date BETWEEN ? AND ? GROUP BY 1 ORDER BY v DESC"""),
+        "by_merchant": rows_for(
+            """SELECT t.merchant_normalized AS label, COUNT(*) AS n,
+                      COALESCE(SUM(CASE WHEN t.flow_type='spend' THEN t.amount_sgd_minor
+                                        WHEN t.flow_type='refund' THEN -t.amount_sgd_minor
+                                        ELSE 0 END), 0) AS v
+               FROM txn t WHERE t.txn_date BETWEEN ? AND ?
+               GROUP BY 1 HAVING v > 0 ORDER BY v DESC LIMIT 12"""),
+        "excluded": rows_for(
+            """SELECT t.flow_type AS label, COUNT(*) AS n,
+                      COALESCE(SUM(t.amount_sgd_minor), 0) AS v
+               FROM txn t WHERE t.txn_date BETWEEN ? AND ? AND t.flow_type <> 'spend'
+               GROUP BY 1 ORDER BY v DESC"""),
     }
 
 

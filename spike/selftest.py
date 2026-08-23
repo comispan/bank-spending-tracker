@@ -375,6 +375,178 @@ def test_row_parsing() -> None:
           repr(pair["opening_balance"]))
 
 
+def test_month_coverage() -> None:
+    """How much of a calendar month the statements actually cover (§4 trap 1).
+
+    The number this protects is the headline of the whole report. On the real
+    corpus August reads as 1,319.55 against July's 4,756.64 — a 72% collapse —
+    and it is nothing of the kind: the month is two-thirds unbilled. Wrong in
+    the direction that would make someone change their behaviour.
+    """
+    print("\nmonth coverage")
+    import months
+
+    check("month bounds", months.month_bounds("2026-08") == ("2026-08-01", "2026-08-31"))
+    check("february in a leap year",
+          months.month_bounds("2028-02") == ("2028-02-01", "2028-02-29"),
+          repr(months.month_bounds("2028-02")))
+    check("december rolls the year",
+          months.month_bounds("2026-12") == ("2026-12-01", "2026-12-31"),
+          repr(months.month_bounds("2026-12")))
+
+    # Touching cycles are contiguous. One ending the 15th and the next starting
+    # the 16th cover the boundary; treating that as a hole would report every
+    # card as permanently incomplete.
+    check("touching windows merge",
+          months.merge([("2026-06-16", "2026-07-15"), ("2026-07-16", "2026-08-15")])
+          == [("2026-06-16", "2026-08-15")])
+    check("a real gap survives merging",
+          len(months.merge([("2026-05-21", "2026-06-20"), ("2026-07-21", "2026-08-20")])) == 2)
+
+    # DBS prints no period, only a statement date. Consecutive statements tile
+    # the timeline, so the start of one is the day after the end of the last —
+    # which is what a billing cycle is.
+    dbs = [{"period_start": None, "period_end": None, "statement_date": "2026-08-14",
+            "first_txn": "2026-07-14"},
+           {"period_start": None, "period_end": None, "statement_date": "2026-07-14",
+            "first_txn": "2026-06-13"}]
+    check("a statement date alone still yields a window",
+          months.statement_windows(dbs) == [("2026-06-13", "2026-08-14")],
+          repr(months.statement_windows(dbs)))
+
+    # A statement with no end at all bounds nothing, and inventing one would
+    # claim coverage that may not exist.
+    check("a statement with no dates is dropped",
+          months.statement_windows([{"first_txn": "2026-06-01"}]) == [],
+          repr(months.statement_windows([{"first_txn": "2026-06-01"}])))
+
+    full = [("2026-08-01", "2026-08-31")]
+    check("a fully covered month", months.card_coverage(full, "2026-08")["state"] == "complete")
+    check("no window at all is missing",
+          months.card_coverage([("2026-06-01", "2026-06-30")], "2026-08")["state"] == "missing")
+
+    # Both ends matter. The first version of this only asked how far coverage
+    # reached, so a month missing its opening fortnight looked complete.
+    late = months.card_coverage([("2026-06-17", "2026-08-17")], "2026-06")
+    check("a month covered only from mid-month is partial", late["state"] == "partial")
+    check("...and says where it starts", late["from"] == "2026-06-17", repr(late))
+
+    early = months.card_coverage([("2026-07-16", "2026-08-14")], "2026-08")
+    check("a month billed only to the 14th is partial", early["state"] == "partial")
+    check("...and says how far it reaches", early["through"] == "2026-08-14", repr(early))
+
+    holed = months.card_coverage(
+        [("2026-06-21", "2026-07-05"), ("2026-07-20", "2026-07-31")], "2026-07")
+    check("a missing statement leaves a gap inside the month", holed["gap"], repr(holed))
+
+    # Across cards: the trustworthy window is the intersection, because outside
+    # it the total is a sum of however many cards happened to be covered.
+    coverage = {
+        "A": [("2026-06-13", "2026-08-14")],
+        "B": [("2026-06-17", "2026-08-17")],
+        "C": [("2026-06-16", "2026-08-16")],
+    }
+    aug = months.month_completeness("2026-08", coverage)
+    check("the month ends where the first card's coverage ends",
+          aug["covered_through"] == "2026-08-14", repr(aug["covered_through"]))
+    check("...and begins at the month start when every card reaches it",
+          aug["covered_from"] == "2026-08-01", repr(aug["covered_from"]))
+    check("a partial month is not complete", not aug["is_complete"])
+
+    jun = months.month_completeness("2026-06", coverage)
+    check("a month opening in a gap begins at the last card's start",
+          jun["covered_from"] == "2026-06-17", repr(jun["covered_from"]))
+
+    # One card absent means no window is trustworthy — not "the window the
+    # others agree on", which would quietly present a total missing a card.
+    absent = dict(coverage, D=[("2026-01-01", "2026-01-31")])
+    gone = months.month_completeness("2026-08", absent)
+    check("a card missing outright makes the month unboundable",
+          gone["covered_from"] is None and gone["missing"] == ["D"], repr(gone["missing"]))
+    check("...and it is not silently comparable", months.comparable_days(gone) is None)
+
+    whole = months.month_completeness(
+        "2026-08", {"A": [("2026-07-01", "2026-09-30")]})
+    check("a fully covered month is complete", whole["is_complete"], repr(whole))
+    check("a complete month needs no day restriction",
+          months.comparable_days(whole) is None, repr(months.comparable_days(whole)))
+    check("a partial month reports its comparable days",
+          months.comparable_days(aug) == (1, 14), repr(months.comparable_days(aug)))
+
+
+def test_cycle_dates() -> None:
+    """When the statement date is a column header rather than a line label.
+
+    Four of ten statements in the corpus reported no period at all, which makes
+    §4's "is this month complete for this card" unanswerable — and all four
+    print the answer, just not on a line the parser could read.
+    """
+    print("\ncycle dates")
+    import rows
+
+    # DBS: labels stacked over their values, one row of columns.
+    dbs = (
+        "        STATEMENT DATE     CREDIT LIMIT    MINIMUM PAYMENT   PAYMENT DUE DATE\n"
+        "          14 Jul 2026       $21,000.00         $50.00          11 Aug 2026\n"
+    )
+    got = rows.document_context([dbs])
+    check("a statement date under its column header is found",
+          got.statement_date == "2026-07-14", repr(got.statement_date))
+
+    # The trap: the same grid also carries the payment due date, nearly a month
+    # later and inside the *next* cycle. Taking the wrong column dates every row
+    # in the statement to the wrong month.
+    check("the payment due date is not mistaken for it",
+          got.statement_date != "2026-08-11", repr(got.statement_date))
+
+    # MariBank: three stacked header lines, a units row, and a value row that
+    # opens with a card name — so the label and its value never line up by
+    # column. Order is what survives.
+    mari = (
+        "       ACCOUNT   STATEMENT DATE CREDIT LIMIT STATEMENT DUE MINIMUM PAYMENT\n"
+        "                                                    PAYMENT DUE DUE DATE\n"
+        "                            (SGD)       (SGD)       (SGD)\n"
+        "\n"
+        "       MARI CREDIT 21 JUN 2026 21,000.00 235.20      10.00       10 JUL 2026\n"
+    )
+    got = rows.document_context([mari])
+    check("stacked headers three deep still pair up",
+          got.statement_date == "2026-06-21", repr(got.statement_date))
+
+    # If the counts disagree there is nothing on the row saying which date is
+    # which, so claim nothing — the same rule as the multi-column TOTAL guard.
+    ambiguous = (
+        "        STATEMENT DATE     PAYMENT DUE DATE\n"
+        "          14 Jul 2026\n"
+    )
+    got = rows.document_context([ambiguous])
+    check("two headers and one date claims nothing",
+          got.statement_date is None, repr(got.statement_date))
+
+    # A labelled line still wins over the grid: it is the issuer saying so,
+    # rather than an inference from where the ink landed.
+    both = "Statement Date: 16 Jul 2026\n" + dbs
+    check("an explicit label outranks the grid",
+          rows.document_context([both]).statement_date == "2026-07-16",
+          repr(rows.document_context([both]).statement_date))
+
+    # Transaction rows print no year, which is what keeps this out of the table.
+    table = (
+        "        STATEMENT DATE     PAYMENT DUE DATE\n"
+        "   13 JUN 14 JUN SOME MERCHANT SINGAPORE            12.34\n"
+    )
+    check("a dated transaction row is not read as a grid value",
+          rows.document_context([table]).statement_date is None,
+          repr(rows.document_context([table]).statement_date))
+
+    # Trust prints a full cycle on page 1, with its address bleeding into the
+    # same line — so the label cannot be anchored to the start of the line.
+    trust = "Block 90B Statement cycle 17 Jun 2026 - 17 Jul 2026\n"
+    got = rows.document_context([trust])
+    check("a statement cycle is read as a period",
+          got.period == ("2026-06-17", "2026-07-17"), repr(got.period))
+
+
 def test_merchant_normalization() -> None:
     """The key tier 2 of the categorizer looks up (DESIGN.md §3).
 
@@ -857,6 +1029,8 @@ if __name__ == "__main__":
     test_encryption_paths()
     test_row_detection()
     test_row_parsing()
+    test_month_coverage()
+    test_cycle_dates()
     test_merchant_normalization()
     test_flow_type()
     test_resolution_order()

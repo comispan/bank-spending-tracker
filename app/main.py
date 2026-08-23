@@ -15,6 +15,7 @@ happens.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -48,11 +49,13 @@ def startup() -> None:
     # already stored — the alternative is old statements silently keeping rules
     # that no longer exist. Counts, never descriptions: DESIGN.md §7.
     with db.connect() as conn:
+        periods = db.backfill_periods(conn)
         moved = db.renormalize_merchants(conn)
         seeded = db.seed_memory(conn)
         recategorized = db.recategorize_all(conn)
         conn.commit()
-    for label, n in (("merchant keys recomputed", moved),
+    for label, n in (("statement periods re-read", periods),
+                     ("merchant keys recomputed", moved),
                      ("merchants seeded", seeded),
                      ("transactions recategorized", recategorized)):
         if n:
@@ -270,18 +273,27 @@ def delete(statement_id: int):
 
 @app.get("/transactions", response_class=HTMLResponse)
 def all_transactions(request: Request, error: str | None = None, notice: str | None = None,
-                     uncategorized: int = 0):
+                     uncategorized: int = 0, month: str | None = None):
+    if month and not re.fullmatch(r"\d{4}-\d{2}", month):
+        month = None
     with db.connect() as conn:
-        where = "WHERE t.category IS NULL" if uncategorized else ""
+        clauses, args = [], []
+        if uncategorized:
+            clauses.append("t.category IS NULL")
+        if month:
+            clauses.append("substr(t.txn_date, 1, 7) = ?")
+            args.append(month)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         txns = conn.execute(
             f"""SELECT t.*, a.issuer, a.last4 FROM txn t
                 JOIN account a ON a.id = t.account_id
                 {where}
-                ORDER BY t.txn_date DESC, t.id DESC"""
+                ORDER BY t.txn_date DESC, t.id DESC""", args
         ).fetchall()
         stats = db.coverage(conn)
     return templates.TemplateResponse(request, "transactions.html", {
         "txns": txns, "stats": stats, "uncategorized_only": bool(uncategorized),
+        "month_filter": month,
         "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
         "error": error, "notice": notice,
     })
@@ -320,6 +332,38 @@ def recategorize(txn_id: int, category: str = Form(""), flow_type: str = Form("s
     note = f"Categorized{f' and applied to {others} matching row(s)' if others else ''}"
     return RedirectResponse(f"{target}?notice={note.replace(' ', '+')}#t{txn_id}",
                             status_code=303)
+
+
+@app.get("/months", response_class=HTMLResponse)
+def month_list(request: Request, error: str | None = None, notice: str | None = None):
+    """Spending by calendar month, with how much of each month is actually billed.
+
+    The completeness line is not decoration. Without it the newest month reads
+    as a collapse in spending when it is simply half unbilled — every card in
+    the corpus closes mid-month, so this is the normal state of the newest row,
+    not an edge case.
+    """
+    with db.connect() as conn:
+        report = db.month_report(conn)
+        coverage = db.coverage_by_account(conn)
+    return templates.TemplateResponse(request, "months.html", {
+        "report": report, "coverage": coverage, "error": error, "notice": notice,
+    })
+
+
+@app.get("/months/{ym}", response_class=HTMLResponse)
+def month_view(request: Request, ym: str):
+    if not re.fullmatch(r"\d{4}-\d{2}", ym):
+        return RedirectResponse("/months?error=Not+a+month", status_code=303)
+    with db.connect() as conn:
+        row = next((m for m in db.month_report(conn) if m["month"] == ym), None)
+        if not row:
+            return RedirectResponse("/months?error=No+transactions+that+month", status_code=303)
+        detail = db.month_detail(conn, ym)
+    biggest = max((r["v"] for r in detail["by_category"]), default=0)
+    return templates.TemplateResponse(request, "month.html", {
+        "m": row, "d": detail, "biggest": biggest,
+    })
 
 
 @app.get("/merchants", response_class=HTMLResponse)

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}{{ m.month }}{% endblock %}
+{% block content %}
+
+<p class="crumbs"><a href="/months">Months</a> / {{ m.month }}</p>
+
+<h1>{{ m.month }} — {{ m.spend_minor | money }}</h1>
+
+{% if m.is_complete %}
+  <div class="banner notice">
+    Every card is billed for the whole of this month. The figures below are the
+    complete picture of card spending.
+  </div>
+{% elif m.covered_from %}
+  <div class="banner error" style="background: var(--warn-bg); color: var(--warn)">
+    <strong>Part-billed month.</strong> All {{ m.cards_total }} cards are covered
+    only for days {{ m.covered_from[8:] | int }}–{{ m.covered_through[8:] | int }} of this month —
+    spending outside those days is on statements you do not have yet.
+    {% if m.delta_minor is not none %}
+      Compared like for like against {{ m.prior }} over the same days, spending is
+      <strong>{{ '+' if m.delta_minor > 0 }}{{ m.delta_minor | money }}</strong>
+      ({{ m.spend_comparable | money }} vs {{ m.prior_comparable | money }}).
+    {% elif m.not_comparable %}
+      There is no fair comparison to draw yet — {{ m.not_comparable }}. Upload
+      the missing statement and this becomes a real month-on-month figure.
+    {% endif %}
+  </div>
+{% else %}
+  <div class="banner error">
+    <strong>This month cannot be bounded.</strong>
+    {% if m.missing %}No statement covers it for {{ m.missing | join(', ') }}.{% endif %}
+    {% if m.gaps %}A billing cycle is missing for {{ m.gaps | join(', ') }}.{% endif %}
+    The total below is only the rows that happen to be uploaded, so treat it as a
+    floor rather than a figure.
+  </div>
+{% endif %}
+
+<p class="links">
+  <a href="/transactions?month={{ m.month }}">All {{ m.rows_total }} transactions</a>
+  {%- if m.uncategorized %} ·
+    <a href="/merchants">{{ m.uncategorized }} still uncategorized</a>
+  {%- endif %}
+</p>
+
+<h2>By category</h2>
+<table>
+  <thead><tr><th>Category</th><th></th><th class="num">Spend</th><th class="num">Rows</th></tr></thead>
+  <tbody>
+  {% for r in d.by_category %}
+    <tr>
+      <td>{{ r.label }}</td>
+      <td class="barcell">
+        <span class="bar{{ ' unknown' if r.label == '(uncategorized)' }}"
+              style="width: {{ (100 * r.v / biggest) | round | int if biggest > 0 and r.v > 0 else 0 }}%"></span>
+      </td>
+      <td class="num">{{ r.v | money }}</td>
+      <td class="num muted">{{ r.n }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>By card</h2>
+<table>
+  <thead><tr><th>Card</th><th class="num">Spend</th><th class="num">Rows</th><th>Covers</th></tr></thead>
+  <tbody>
+  {% for r in d.by_card %}
+    <tr>
+      <td>{{ r.label }}</td>
+      <td class="num">{{ r.v | money }}</td>
+      <td class="num muted">{{ r.n }}</td>
+      <td>
+        {% set c = m.per_card.get(r.label) %}
+        {% if not c %}<span class="muted">—</span>
+        {% elif c.state == 'complete' %}<span class="src rule">whole month</span>
+        {% elif c.gap %}<span class="src none">missing a cycle</span>
+        {% else %}<span class="src seed">{{ c['from'][8:] }}–{{ c.through[8:] }}</span>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Top merchants</h2>
+<table>
+  <thead><tr><th>Merchant</th><th class="num">Spend</th><th class="num">Rows</th></tr></thead>
+  <tbody>
+  {% for r in d.by_merchant %}
+    <tr><td><code>{{ r.label }}</code></td>
+        <td class="num">{{ r.v | money }}</td>
+        <td class="num muted">{{ r.n }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% if d.excluded %}
+<h2>Not counted as spending</h2>
+<p class="hint">
+  Card payments, transfers, fees and income are held out of the total above —
+  a payment to a card is the same money moving, and counting it would
+  double-count against the bank statement that also shows it (§3).
+</p>
+<table>
+  <thead><tr><th>Flow</th><th class="num">Amount</th><th class="num">Rows</th></tr></thead>
+  <tbody>
+  {% for r in d.excluded %}
+    <tr><td><span class="flowtag {{ r.label }}">{{ r.label }}</span></td>
+        <td class="num">{{ r.v | money }}</td>
+        <td class="num muted">{{ r.n }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endblock %}

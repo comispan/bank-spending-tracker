@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Months{% endblock %}
+{% block content %}
+
+<h1>Spending by month</h1>
+<p class="hint">
+  Bucketed by <strong>transaction date</strong>, never by which statement a row
+  arrived in — your cards close between the 13th and the 20th, so every calendar
+  month draws on two statements per card. The newest month is therefore always
+  part-billed, which is why each row says how much of itself it can actually
+  account for. A month total without that caveat is not a small error: it reads
+  as a collapse in spending that never happened.
+</p>
+
+{% if not report %}
+  <p class="empty">Nothing yet. <a href="/">Upload a statement.</a></p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Month</th><th class="num">Spend</th><th>Covers</th>
+      <th class="num">Like for like</th><th>Cards</th><th class="num">Rows</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for m in report %}
+    <tr>
+      <td><a href="/months/{{ m.month }}"><strong>{{ m.month }}</strong></a>
+        {% if m.uncategorized %}
+          <span class="merchant">{{ m.uncategorized }} row(s) uncategorized</span>
+        {% endif %}
+      </td>
+      <td class="num">{{ m.spend_minor | money }}</td>
+      <td>
+        {% if m.is_complete %}
+          <span class="src rule">complete</span>
+        {% elif m.covered_from %}
+          <span class="src seed">days {{ m.covered_from[8:] | int }}–{{ m.covered_through[8:] | int }}</span>
+        {% else %}
+          <span class="src none">not boundable</span>
+        {% endif %}
+      </td>
+      <td class="num">
+        {% if m.delta_minor is none %}
+          <span class="muted">—</span>
+          {% if m.not_comparable %}
+            <span class="merchant">{{ m.not_comparable }}</span>
+          {% endif %}
+        {% else %}
+          <span class="{{ 'credit' if m.delta_minor < 0 else '' }}">
+            {{ '+' if m.delta_minor > 0 }}{{ m.delta_minor | money }}
+          </span>
+          <span class="merchant">
+            {{ m.spend_comparable | money }} vs {{ m.prior_comparable | money }} in {{ m.prior }}
+            {%- if m.comparable_days %}, days {{ m.comparable_days[0] }}–{{ m.comparable_days[1] }}{% endif %}
+          </span>
+        {% endif %}
+      </td>
+      <td>
+        {{ m.cards_complete }} of {{ m.cards_total }}
+        {% if m.missing %}
+          <span class="merchant">no statement: {{ m.missing | join(', ') }}</span>
+        {% endif %}
+        {% if m.gaps %}
+          <span class="merchant">missing a cycle: {{ m.gaps | join(', ') }}</span>
+        {% endif %}
+        {# Naming the part-billed cards is what explains the "Covers" column —
+           four cards covering the whole month and one covering ten days still
+           leaves only ten days that every card agrees on. #}
+        {% for label in m.partial %}
+          {% set c = m.per_card.get(label) %}
+          {% if c and c['from'] %}
+            <span class="merchant">{{ label }}: {{ c['from'][8:] | int }}–{{ c.through[8:] | int }}</span>
+          {% endif %}
+        {% endfor %}
+      </td>
+      <td class="num muted">{{ m.rows_total }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>What each card covers</h2>
+<p class="hint">
+  Built from the periods the statements print. Where an issuer prints only a
+  statement date, consecutive statements are assumed to tile the timeline — a
+  cycle ends where the next begins. A break in this list is a statement you have
+  not uploaded.
+</p>
+<table>
+  <thead><tr><th>Card</th><th>Covered</th></tr></thead>
+  <tbody>
+  {% for label, windows in coverage.items() %}
+    <tr>
+      <td>{{ label }}</td>
+      <td class="date">
+        {% for start, end in windows %}
+          {{ start }} → {{ end }}{% if not loop.last %} <span class="src none">gap</span> {% endif %}
+        {% endfor %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endblock %}

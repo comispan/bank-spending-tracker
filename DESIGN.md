@@ -314,8 +314,19 @@ Merchant normalization, the `flow_type` axis, tiers 1 and 2, inline recategorize
 >
 > Two numbers from it already shape the decision. **The eval set's most common category alone scores 53%** — that is the floor any model has to clear, and it is high because real spending is lopsided. And **a full second month across all five cards leaves 34 merchants (39 rows, 24% of spend) for tier 3**, of which 30 are one-offs — so this is a permanent monthly cost that merchant memory cannot learn away, which is the actual argument for building tier 3 at all.
 
-**Phase 3 — Consolidation & report (~1 week).**
+**Phase 3 — Consolidation & report (~1 week). Month view + completeness done 2026-08-22.**
 Multiple accounts, dedup, calendar-month bucketing, the monthly report page with drill-through. This is the point where the app becomes the thing you described.
+
+> **Trap 1, measured.** The five cards close on **four different days** — DBS ~13th, Standard Chartered and UOB 15th–16th, Trust 17th, MariBank 20th. So redefining a "month" to follow the cycle does not work: any single boundary still slices four cards mid-cycle, and it costs the one framing users actually think in. Calendar months stay; what the report publishes instead is **how far the data reaches**, in `app/months.py`.
+>
+> Coverage is a window with **two** ends. The newest month is part-billed — obvious. The oldest month begins partway through, because that is when the earliest statement begins — not obvious, and it made the first version of this report call a month complete that was missing its opening fortnight. The trustworthy figure is the intersection across every card.
+>
+> Two things fell out of building it that no amount of design would have found:
+>
+> - **A missing statement, detected.** MariBank's 21 Jun – 20 Jul cycle was never uploaded, so July has 4 of 5 cards and every month-on-month comparison in the corpus is currently unsound. The report names it rather than averaging over it.
+> - **The comparison has two sides.** It is easy to remember that *this* month may be part-billed and easy to forget that the month being compared against may be too. August 1–14 against July 1–14 reads as fair and is not. A delta is shown only when both months are billed across the same days, and otherwise the reason is printed — which doubles as an instruction for which statement to go and find.
+>
+> Deferred on evidence: **transaction-level dedup**. Across 343 rows and 10 statements there are zero cross-statement duplicate candidates; the `file_sha256` check and the issuer reference already cover what actually occurs. Build it when a duplicate appears, not in anticipation — the same call §5 made about `issuer_template`.
 
 **Phase 4 — Hardening (ongoing).**
 OCR path for scanned statements, CSV/Excel export, replay-old-statements-with-new-parser tooling, issuer-specific summary labels as new banks arrive. Encrypted-PDF passwords and multi-currency are already handled — Phase 0 shipped the empty-password path (DBS needs it) and §4 settles currency.
