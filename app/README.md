@@ -20,6 +20,7 @@ the uploaded PDFs — and is gitignored.
 | `parsing.py` | PDF → verified transactions: decrypt, redact, parse, reconcile. |
 | `merchants.py` | Description → the merchant key the categorizer learns against. Phase 2, step 1. |
 | `categorize.py` | Tiers 1 and 2, and the `flow_type` axis. Pure functions; no DB, no network. |
+| `months.py` | Calendar months, and how much of one the statements actually cover. Pure functions. |
 | `db.py` | SQLite schema and queries. Money is integer minor units, never a float. |
 | `main.py` | FastAPI routes and the four pages. |
 
@@ -57,6 +58,21 @@ to one word would merge `royal plaza` with `royal sporting house`. Where one
 merchant does end up with two keys, `merchant_root()` — the first word — is the
 fallback that reunites them, and tier 2 will look up the precise key first and
 the root second.
+
+**The month view often refuses to show a month-on-month change.** A comparison
+needs both months billed over the same days, and the easy half to remember is
+this month. The half that catches you is the month being compared *against*:
+comparing August 1–14 to July 1–14 looks fair and is not, if a card has no
+statement covering early July — the delta then flatters August by whatever that
+card spent. The report says which statement would make the comparison real
+rather than printing a number that is wrong in an invisible direction.
+
+**A month can be incomplete at the start as well as the end.** The obvious case
+is the newest month, part-billed because every card closes mid-month. The one
+that got the first version of this wrong is the oldest month, which begins
+partway through because that is when the earliest statement begins. Coverage is
+a window with two ends, and the trustworthy total is the intersection across
+every card.
 
 **The bulk screen categorizes merchants, not transactions.** `/merchants` is
 the fast way to a complete report, and it needs no model: the uncategorized

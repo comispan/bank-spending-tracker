@@ -195,6 +195,17 @@ button.tiny { padding: .2rem .5rem; font-size: .72rem; font-weight: 500; }
 }
 td.actions form { display: inline; }
 
+/* ------------------------------------------------- month report (Phase 3) */
+
+/* A bar beside the number rather than instead of it. DESIGN.md §4: the
+   breakdown needs the numeric table, and a donut of thirteen categories is
+   unreadable. Uncategorized is drawn in the warning colour because it is a
+   hole in the report, not a category of spending. */
+.barcell { width: 40%; min-width: 6rem; }
+.bar { display: block; height: .55rem; border-radius: 3px; background: var(--accent);
+       min-width: 1px; }
+.bar.unknown { background: var(--warn); }
+
 /* The bulk merchant screen. The example line is the column that makes a key
    recognizable — `bus/mrt` means nothing until you see the line it came from —
    so it gets room, but not so much that the category select falls off screen. */

@@ -180,7 +180,7 @@ SUMMARY_RE = [(field, re.compile(pat, re.I)) for field, pat in SUMMARY_LABELS]
 
 PERIOD_RE = re.compile(
     rf"""(?ix)
-    (?:statement\s+period|period|statement\s+date|from)\D{{0,12}}
+    (?:statement\s+period|statement\s+cycle|billing\s+cycle|period|statement\s+date|from)\D{{0,12}}
     (?P<a>\d{{1,2}}[ /-](?:{MONTH_RE})[a-z]*[ /-]\d{{2,4}}|\d{{1,2}}/\d{{1,2}}/\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}})
     \s*(?:to|-|–|until)\s*
     (?P<b>\d{{1,2}}[ /-](?:{MONTH_RE})[a-z]*[ /-]\d{{2,4}}|\d{{1,2}}/\d{{1,2}}/\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}})
@@ -203,6 +203,74 @@ STATEMENT_DATE_RE = re.compile(
         |\d{{4}}-\d{{2}}-\d{{2}})
     """
 )
+
+
+# A column header that names a *date* rather than a figure. Longest first, so
+# `PAYMENT DUE DATE` is never read as the bare `DUE DATE` sitting inside it.
+DATE_HEADER = re.compile(
+    r"(?i)\b(?:next\s+statement\s+date|payment\s+due\s+date|statement\s+date"
+    r"|closing\s+date|due\s+date)\b")
+
+# A date carrying a four-digit year. The year is what separates a grid value
+# from a transaction row: rows print `13 JUN`, headers' values print
+# `13 Jun 2026`, so this cannot wander into the transaction table.
+FULL_DATE = re.compile(
+    rf"(?i)\b\d{{1,2}}[ /-](?:{MONTH_RE})[a-z]*[ /-]\d{{4}}\b"
+    rf"|\b\d{{1,2}}/\d{{1,2}}/\d{{4}}\b"
+    rf"|\b\d{{4}}-\d{{2}}-\d{{2}}\b")
+
+# MariBank stacks three header lines plus a units row over its values, so the
+# date grid needs a longer reach than the figure grid above.
+DATE_GRID_HEADER_LINES = 6
+
+
+def read_statement_date_grid(lines: list[str]) -> str | None:
+    """The statement date when its label is a column header, not a prefix.
+
+    Two issuers print it this way and neither can be read line-by-line:
+
+        DBS         STATEMENT DATE   CREDIT LIMIT  MINIMUM PAYMENT  PAYMENT DUE DATE
+                      14 Jul 2026     $21,000.00       $50.00         11 Aug 2026
+
+        MariBank    ACCOUNT  STATEMENT DATE CREDIT LIMIT STATEMENT DUE MINIMUM PAYMENT
+                                                              PAYMENT DUE DUE DATE
+                    CREDIT CARD 20 Jun 2026  21,000.00    235.20   10.00   10 Jul 2026
+
+    Matching *columns* is what `read_summary_grid` does for figures, but it does
+    not survive here: MariBank stacks headers three deep and its value row opens
+    with a card name, so the label and the value it belongs to are several
+    characters apart and drift further with every column.
+
+    What does hold for both is order. The headers that name a date and the dates
+    in the value row come in the same left-to-right sequence, so they can be
+    paired positionally — and the count has to match exactly. If it does not,
+    nothing on the line says which date is which, so **claim nothing**. That is
+    the same rule as the multi-column `TOTAL` guard: taking the wrong column
+    here means reading the payment due date as the statement date, which is
+    wrong by nearly a month and lands inside the *next* cycle.
+    """
+    for i, line in enumerate(lines):
+        dates = sorted((m.start(), m.group()) for m in FULL_DATE.finditer(line))
+        if not dates:
+            continue
+
+        headers: list[tuple[int, str]] = []
+        for j in range(i - 1, max(i - 1 - DATE_GRID_HEADER_LINES, -1), -1):
+            above = lines[j]
+            if not above.strip():
+                continue
+            if FULL_DATE.search(above):
+                break          # another value row: this grid's headers end here
+            headers += [(m.start(), m.group().lower()) for m in DATE_HEADER.finditer(above)]
+
+        if not headers or len(headers) != len(dates):
+            continue
+        headers.sort()
+
+        for (_, label), (_, value) in zip(headers, dates):
+            if "due" not in label and "next" not in label:
+                return _parse_loose_date(value)
+    return None
 
 
 class Context(NamedTuple):
@@ -238,8 +306,13 @@ def document_context(texts: list[str]) -> Context:
             counts[int(y)] = counts.get(int(y), 0) + 1
         fallback = max(counts, key=lambda y: (counts[y], y))
 
+    # A labelled line first — it is the issuer saying so directly. Only then the
+    # column grid, which is an inference from layout and can be wrong in ways a
+    # label cannot.
     m = STATEMENT_DATE_RE.search(joined)
     statement_date = _parse_loose_date(m.group("d")) if m else None
+    if statement_date is None:
+        statement_date = read_statement_date_grid(joined.splitlines())
 
     return Context(period, fallback, statement_date)
 
