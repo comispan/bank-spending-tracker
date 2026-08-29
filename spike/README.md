@@ -30,15 +30,23 @@ ground truth that exists for your own spending.
 python spike\eval_categories.py --list
 python spike\eval_categories.py --model baseline
 python spike\eval_categories.py --model qwen2.5:3b-instruct
+python spike\eval_categories.py --gemini
 python spike\eval_categories.py --model claude-sonnet-5 --anthropic
 ```
 
-It measures what would actually ship, gate included. Every response goes through
-the same contract tier 3 would enforce — no invented merchants, none dropped,
-every category inside the fixed thirteen — and a model that scores well but
-breaks the contract is reported as unusable, because it is. That is the same
-silent-failure shape as the empty array above: correct-looking content, broken
-format.
+It measures what would actually ship, gate included — literally, since the
+prompt, the schema and the gate are imported from `app/tier3.py` rather than
+copied here. A harness that scores a different prompt than the one that runs is
+measuring a component nobody is going to use, and `selftest.py` asserts the
+identity so it cannot quietly become a copy again. Every response goes through
+the same contract tier 3 enforces — no invented merchants, none dropped, every
+category inside the fixed thirteen — and a model that scores well but breaks the
+contract is reported as unusable, because it is. That is the same silent-failure
+shape as the empty array above: correct-looking content, broken format.
+
+`--gemini` grades the backend the app is wired to and needs `GEMINI_API_KEY` set
+in the environment or in a gitignored `.env` at the project root; the model
+defaults to the one tier 3 would use, so it needs no `--model`.
 
 Read the three numbers in this order:
 
@@ -49,8 +57,9 @@ Read the three numbers in this order:
 - **correct** means nothing without the baseline printed beside it — always
   answering your single most common category already scores 53% on this set.
 
-Nothing leaves the machine without `--anthropic`, and even then only merchant
-names — no amounts, dates, balances or card numbers. Pin `-instruct` tags for
+Nothing leaves the machine without `--gemini` or `--anthropic`, and even then
+only merchant names — no amounts, dates, balances or card numbers. Pin
+`-instruct` tags for
 local models; a bare tag is often the thinking build, which narrates into the
 response and breaks the format contract before the categories are looked at.
 

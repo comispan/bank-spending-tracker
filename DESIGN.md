@@ -145,11 +145,154 @@ Any time a user recategorizes a transaction, write the mapping back into tier 2 
 
 > **Tiers 1 and 2 built 2026-08-22** as `app/categorize.py`, pure functions with
 > no database and no network so the resolution order is testable the way
-> `rows.py` is. Tier 3 is not built and the app is complete without it: an
-> unknown merchant resolves to *nothing* and is counted as unknown on the
-> transactions page, rather than being filed under `Other` where the gap would
-> look answered. That is also the shape tier 3 slots into — it fills the
-> `None`s and touches nothing else.
+> `rows.py` is. An unknown merchant resolves to *nothing* and is counted as
+> unknown on the transactions page, rather than being filed under `Other` where
+> the gap would look answered. That is also the shape tier 3 slots into — it
+> fills the `None`s and touches nothing else.
+>
+> **Tier 3 built 2026-08-28** as `app/tier3.py`, against Gemini Flash. Four
+> things about it are load-bearing, and each is a position this document already
+> took somewhere else:
+>
+> - **It is a button on `/merchants`, not a step in the upload.** This is the
+>   app's only outbound request, so it happens when the user asks for it. The
+>   panel prints the literal payload — merchant keys, one per line — before
+>   sending, because a disclosure the user cannot check is not one.
+> - **It writes guesses, marked as guesses.** Answers land in `merchant_memory`
+>   with source `llm`, a third kind of claim alongside `seed` (the app's guess
+>   about everyone) and `memory` (this user's decision). `INSERT OR IGNORE`
+>   makes "a model can only fill a gap" a property of the schema rather than of
+>   the caller. Correcting one promotes it to `memory` permanently, exactly as
+>   correcting a seed does.
+> - **`unknown` is a legal answer and is stored as nothing.** The model
+>   declining leaves the row uncategorized, which is honest and one click from
+>   fixed. This is the same argument §2.3 makes about `unverified`, and it is
+>   why the eval scores abstentions separately from errors.
+> - **The gate is all-or-nothing per batch.** A response that invents a
+>   merchant, drops one, or answers outside the fixed thirteen is discarded
+>   whole, and the screen says so rather than folding the loss into the success
+>   count. Phase 0's finding was that a model fails *silently*; a 90%-complete
+>   response is not 90% useful.
+>
+> The prompt, the schema and the gate live in `tier3.py` and are *imported* by
+> `spike/eval_categories.py`, which previously held its own copies. A harness
+> that grades a different prompt than the one that ships is measuring a
+> component nobody will run — so `selftest.py` now asserts the identity to stop
+> it drifting back apart.
+>
+> **Graded 2026-08-28, `gemini-3.7-flash` over the 43 hand-labelled merchants:**
+>
+> | | | |
+> |---|---:|---|
+> | correct | **33 (77%)** | against a 53% floor — the baseline that always answers the most common category |
+> | WRONG | **4 (9%)** | what would have been stored and mislabelled |
+> | abstained | 6 (14%) | left uncategorized, which is the honest outcome |
+> | gate | **PASS** | no invented merchants, none dropped, every category inside the fixed thirteen |
+>
+> It clears the floor by 24 points, and the 9% is the number that decides it:
+> four wrong answers, of which **none are careless**. One is `apple`, which
+> `categorize.py` already refuses to seed for exactly this reason — subscriptions
+> on one row and a laptop on the next. One is a beauty shop the model filed under
+> Shopping and the user files under Groceries, where the model gave the
+> conventional answer and the user's is personal. The other two are opaque
+> four-character strings. This is the failure profile you want: it is wrong where
+> the merchant is genuinely ambiguous, not where it is legible.
+>
+> **The abstentions found two bugs, which is the more valuable half of the run.**
+> Six merchants the model declined to name, and four of them are not merchants:
+>
+> - **Unlisted payment-processor prefixes keep the processor and discard the
+>   shop.** `merchants.py` implements §3's "keep what follows the `*`" against an
+>   enumerated list — `SQ *` and `PAYPAL *` resolve correctly — and everything
+>   not on that list does the opposite of what the rule intends, normalizing to
+>   the *prefix*. Every merchant behind a given gateway then collapses into one
+>   key. That is precisely the `royal plaza` / `royal sporting house` merge §3
+>   designed the two-key scheme to prevent, arriving from the other direction:
+>   two merchants merged into one key is wrong data, quietly.
+>
+>   **Fixed 2026-08-29, by shape rather than by inverting the default.** The
+>   obvious repair — an unrecognized `XXX*` keeps what *follows* the star — was
+>   measured against all 16 starred rows in the corpus first, and it trades four
+>   wrong keys for eight: `GRAB *TRIP 4821` becomes `trip`, `SIMBATELECOM****2269`
+>   becomes `2269`, `AMZN Mktp SG*RT4G91` becomes `rt4g91 amazon.sg`. All three
+>   are keys that change next month, which is worse than a coarse key that does
+>   not, and it is the failure the enumerated list was avoiding in the first
+>   place. What actually separates the two shapes is legible on both sides at
+>   once: a gateway is a *code* (`SMP`, `GRB`, `2C2` — one token, three
+>   characters or carrying a digit) and it hands over a *whole shop name* (two
+>   name-shaped tokens before the first reference or place). A merchant starring
+>   its own reference is a real word and gives one token at most before the
+>   digits start. Both halves must hold before the right side wins, which keeps
+>   `M1*DATA 88213` on the left. The list survives as an override for a known
+>   gateway that hands over a single word (`SQ *BLUE BOTTLE COFFEE`).
+>
+>   Same lesson as §2.2 and for the same reason: an enumerated list only ever
+>   names the gateways already met, and the one it has not met is the one that
+>   merges two shops. Six rows re-keyed on the next boot — `renormalize_merchants`
+>   replays the rule over everything already stored — and the five that had
+>   inherited a category from the gateway code correctly went back to
+>   uncategorized, because a decision made about `smp` was never a decision about
+>   Li Xin Fish Ball. Coverage 341/343 → 336/343; that drop is the bug becoming
+>   visible, not a regression.
+> - **A foreign-currency subline is stored as a transaction's whole
+>   description.** The Trust HKD charge from §4 has the right amount and
+>   reconciles clean, but its merchant name is gone, so it can never be
+>   categorized by anything. §4 anticipated the split and it is still unbuilt.
+>
+>   **Fixed 2026-08-29.** The row is three lines, which is why one-line parsing
+>   lost it — merchant above, both figures on the dated line, rate below:
+>
+>   ```
+>                            Pinduoduo
+>       02 Jul   04 Jul                   102.67 HKD    16.99
+>                             1 HKD = 0.1655 SGD
+>   ```
+>
+>   The amount comes off the end as always, so what is left over is the
+>   *foreign* figure rather than a merchant. `rows.py` now recognizes that
+>   shape, claims the name from the line above and the rate from the line
+>   below, and stores all three — or none: with no name above, the figure stays
+>   where it is, because a description replaced by a name that was never found
+>   is worse than one that is honestly not a merchant. A rate naming a
+>   different currency is not claimed either. This is what finally implements
+>   §4's "store both, at the statement's own rate": `amount_minor`/`currency`
+>   hold 102.67 HKD, `amount_sgd_minor`/`fx_rate` hold 16.99 at 0.1655, and the
+>   SGD side is still what reconciles. `db.backfill_foreign_amounts` replays it
+>   over statements already uploaded, off `page_text` and matched on
+>   `(date, amount)` — the same argument as `backfill_periods`, and §5's reason
+>   for keeping the text at all.
+>
+> Neither is a tier-3 defect and both were invisible before tier 3 ran. A model
+> that abstains honestly turns out to be a detector for keys that carry no
+> merchant — which is an argument for the abstention rule that nobody made when
+> it was written.
+>
+> **Run against the real backlog, same day.** 34 unknown merchants in, 32
+> categorized and 2 declined, moving 37 transactions and taking coverage from
+> **89% to 99.4%** (341 of 343). Both survivors are keys with no merchant in
+> them — one truncated to three characters, one a holding company — so the
+> remaining gap is the normalization bug above, not a categorization gap.
+> Fixing that bug on 2026-08-29 took coverage back to 336/343, because the four
+> shops it un-merged arrived as merchants nobody had decided about yet. That is
+> the number doing its job: 99.4% was counting a gateway code as an answer.
+>
+> Worth stating plainly, because the §8 note argued the opposite and was right
+> to: tier 3 did not clear this backlog *better* than the `/merchants` screen
+> would have. It cleared it *unattended*, at 9% wrong, and the errors it makes
+> are on merchants a person would also have to think about. The screen remains
+> the honest way to answer 43 merchants you have opinions about; tier 3 is for
+> the handful each month that you don't.
+>
+> **Cost and latency, free tier.** The 43-merchant batch is one request. The
+> model answers in seconds, but `gemini-3.7-flash` returns HTTP 500 "experiencing
+> high demand" under load and the free tier allows five requests a minute, so the
+> graded run took 148s wall-clock — nearly all of it waiting between retries.
+> Both failures are temporary and both say so in the response body, so
+> `ask_gemini` retries them, prefers the delay the API itself asks for over a
+> guessed backoff, and refuses to retry a 400 or 401 that would fail identically
+> forever. A read timeout is retried too: it is not a `URLError` but a sibling of
+> it under `OSError`, which is how the first live run escaped the error handling
+> entirely and surfaced as a stack trace.
 >
 > Three things came out differently from the sketch above, each for a reason:
 >
@@ -299,10 +442,10 @@ Smaller than originally planned, because Phase 0 removed the queue, the worker, 
 5. Needs-review screen: parsed rows beside the source page. This is where a `fail` or `unverified` gets resolved, and Phase 0 proved you will use it.
 6. Dedup on `file_sha256` at minimum — re-uploading the same PDF must be caught. Full transaction-level dedup can wait for Phase 3, but note that UOB already has two genuinely identical same-day rows, so **never dedup silently within a single statement**.
 
-**Phase 2 — Categorization (~1 week). Tiers 1 and 2 done 2026-08-22.**
+**Phase 2 — Categorization (~1 week). Tiers 1 and 2 done 2026-08-22; tier 3 built 2026-08-28.**
 Merchant normalization, the `flow_type` axis, tiers 1 and 2, inline recategorize with "apply to all matching", and a rules & memory page. Seeded with ~100 common merchants, stored as `seed` so a shipped guess is never mistaken for the user's own decision.
 
-**Still open: tier 3**, and with it §9.4 — the only question in this app about anything leaving the machine. On the corpus as it stands, the free tiers answer about a third of rows cold, before the user has taught it anything; that number is on the transactions page and is the honest measure of how much work tier 3 actually has.
+**Tier 3 is built against Gemini Flash**, settling §9.4: a cloud model, sending normalized merchant names and nothing else, off unless a key is configured and never triggered by an upload. The design is in §3; what makes it safe to let a model write at all is that it can only fill gaps, its answers are labelled `llm` rather than `memory`, and a batch that breaks the contract is discarded whole. **Graded before it shipped: 77% correct against a 53% floor, 9% wrong, gate PASS** — and its abstentions found two bugs in components that were considered done (§3).
 
 > **What the gap actually is, measured 2026-08-22.** The 103 uncategorized rows are **43 merchants**, five of which account for 59 rows. But they carry **91% of the spending by value** — the seeds cover a lot of small repeating charges and almost none of the money, so a monthly report built today would be describing 9% of the spending. Clearing this is a prerequisite for Phase 3, not a tidying task.
 >
@@ -310,12 +453,27 @@ Merchant normalization, the `flow_type` axis, tiers 1 and 2, inline recategorize
 >
 > It also produces the thing that makes tier 3 gradeable: a set of merchant keys the user labelled by hand. Run a candidate model over those with the labels hidden and the disagreements are a real accuracy number — the same discipline as §2.3, which is that a component nobody can grade does not ship.
 >
-> **The grader exists: `spike/eval_categories.py` (2026-08-22).** It scores a candidate against those hand-labelled merchants and enforces the exact contract tier 3 would — no invented merchants, none dropped, every category inside the fixed thirteen — so a model that is accurate but cannot hold a format is reported as unusable rather than promising. `unknown` is a legal answer and is scored as an abstention, not as an error: a row left uncategorized is honest, a confident wrong answer is stored and mislabels the spending.
+> **The grader exists: `spike/eval_categories.py` (2026-08-22).** It scores a candidate against those hand-labelled merchants and enforces the exact contract tier 3 does — no invented merchants, none dropped, every category inside the fixed thirteen — so a model that is accurate but cannot hold a format is reported as unusable rather than promising. `unknown` is a legal answer and is scored as an abstention, not as an error: a row left uncategorized is honest, a confident wrong answer is stored and mislabels the spending. Since 2026-08-28 it imports the prompt, schema and gate from `app/tier3.py` instead of holding copies, so the score describes the shipping code.
 >
 > Two numbers from it already shape the decision. **The eval set's most common category alone scores 53%** — that is the floor any model has to clear, and it is high because real spending is lopsided. And **a full second month across all five cards leaves 34 merchants (39 rows, 24% of spend) for tier 3**, of which 30 are one-offs — so this is a permanent monthly cost that merchant memory cannot learn away, which is the actual argument for building tier 3 at all.
 
-**Phase 3 — Consolidation & report (~1 week). Month view + completeness done 2026-08-22.**
+**Phase 3 — Consolidation & report (~1 week). Month view + completeness done 2026-08-22; report finished 2026-08-29.**
 Multiple accounts, dedup, calendar-month bucketing, the monthly report page with drill-through. This is the point where the app becomes the thing you described.
+
+> **What finishing it added, 2026-08-29.** Drill-through, the three-month average, and new/unusual — the three items §4 listed that the first pass left out.
+>
+> **Every figure is now a link.** Category, card, merchant and each excluded flow open the rows behind them, and each row links to the statement page it was read from. That was §4's "what makes users trust it" and it cost almost nothing, because `source_page` was already stored — which is exactly why §4 said to store it at extraction time.
+>
+> The half worth stating is the destination, not the links. A filtered list that renders identically to the full list is how a slice gets read as the total, so `/transactions` now prints which filters are active and the net spend of *what is on screen* — a figure that can be checked against the one that was clicked. The whole-corpus coverage line stays beside it rather than being quietly rescoped, because it answers a different question.
+>
+> **The average is held to the same standard as the delta, and for a sharper reason.** An average hides a part-billed month better than a single comparison does: three short months make one low figure with nothing on its face to say it is short, and every month measured against it then reads as an overspend. So a month contributes only if it is billed across the days being reported, and contributes its spend over *those* days; two contributors minimum, since an average of one month is last month. On this corpus **no month qualifies**, and the report says which months fall short instead of printing a number — the same instruction-to-go-find-a-statement the delta already gives.
+>
+> **Two bugs in the shipped comparison, both found by making the average produce a number.** Neither was reachable from this corpus, which is why building the feature found them and reading the code did not.
+>
+> - **Months are different lengths, and the comparison ignored it.** A complete June is billed 1–30 and can never satisfy "billed across days 1–31", so a fair June-to-July comparison refused itself — and the reason it printed, "only billed for days 1–30", reads like a missing statement when it is really just the calendar. The delta had shipped with this since 2026-08-22; `months.covers_days` now clamps the window to the month's own length, and the same helper gates the average.
+> - **Two statements on one card sharing an end date raised a `TypeError`.** `statement_windows` sorted `(end, statement)` pairs, so a tie fell through to comparing the dicts, which do not order. Reachable in real use: a bank re-issues a cycle, the corrected file is uploaded beside the original, and `file_sha256` does not catch it because the file genuinely differs. The months page 500s rather than rendering.
+>
+> **New and unusual are two different standards of proof and are not merged.** A merchant with no earlier row is reportable without a complete month, but it is "new to the statements uploaded", not "new to your spending" — an unbilled fortnight hides a first visit, and the screen says so. A category running hot needs an average to be hot against, so it inherits the trailing gate and reports nothing when nothing qualifies. A category with no history is *new*, not hot: dividing by an absent average is how a first $3 coffee becomes an infinite overspend, and it belongs in the merchant list instead.
 
 > **Trap 1, measured.** The five cards close on **four different days** — DBS ~13th, Standard Chartered and UOB 15th–16th, Trust 17th, MariBank 20th. So redefining a "month" to follow the cycle does not work: any single boundary still slices four cards mid-cycle, and it costs the one framing users actually think in. Calendar months stay; what the report publishes instead is **how far the data reaches**, in `app/months.py`.
 >
@@ -329,7 +487,9 @@ Multiple accounts, dedup, calendar-month bucketing, the monthly report page with
 > Deferred on evidence: **transaction-level dedup**. Across 343 rows and 10 statements there are zero cross-statement duplicate candidates; the `file_sha256` check and the issuer reference already cover what actually occurs. Build it when a duplicate appears, not in anticipation — the same call §5 made about `issuer_template`.
 
 **Phase 4 — Hardening (ongoing).**
-OCR path for scanned statements, CSV/Excel export, replay-old-statements-with-new-parser tooling, issuer-specific summary labels as new banks arrive. Encrypted-PDF passwords and multi-currency are already handled — Phase 0 shipped the empty-password path (DBS needs it) and §4 settles currency.
+OCR path for scanned statements, CSV/Excel export, replay-old-statements-with-new-parser tooling, issuer-specific summary labels as new banks arrive. Encrypted-PDF passwords and multi-currency are handled — Phase 0 shipped the empty-password path (DBS needs it), and the foreign-charge split landed 2026-08-29 (§3). Until then this line claimed multi-currency was done on the strength of §4 having *decided* it, which is not the same thing: the code stored one currency and no rate. A decision recorded in the design reads exactly like a feature in the code when you skim for what is left.
+
+Replay tooling is now half-built by accident and worth finishing deliberately: `backfill_periods` and `backfill_foreign_amounts` both re-parse `page_text` on boot for one field each. A third would be the point to generalize them into "re-run the parser over every stored statement and diff", which is the thing that makes a parser fix reach old data without re-uploading.
 
 **Deliberately deferred:** budgets, forecasting, recurring-subscription detection (nice, and easy once you have clean data — but it's a different product surface), bank API sync, mobile.
 
@@ -340,7 +500,7 @@ OCR path for scanned statements, CSV/Excel export, replay-old-statements-with-ne
 1. **Which banks?** DBS, MariBank, Standard Chartered, Trust, UOB. All five parse and reconcile today.
 2. **Base currency?** SGD, with each transaction keeping its original amount, currency and the statement's own FX rate. Driven by a real HKD charge in the Trust statement, not a hypothetical.
 3. **Single-user or multi-tenant?** **Single-user, self-hosted.** No auth, no RLS, no tenant scoping. Roughly halves the build and removes most of §7.
-4. **Is sending statement text to an LLM acceptable?** Moot for extraction — nothing leaves the machine. The question survives only for categorization (§3, tier 3), which sends normalized merchant names and no figures at all. Decide it in Phase 2; a local model is a legitimate answer.
+4. **Is sending statement text to an LLM acceptable?** Moot for extraction — nothing leaves the machine. The question survives only for categorization (§3, tier 3), which sends normalized merchant names and no figures at all. **Settled 2026-08-28: yes, narrowly — a cloud model (Gemini Flash), opt-in, for merchant names only.** What made it acceptable was not the model choice but the shape of the payload: `grab`, `fairprice`, `netflix`, one per line, printed on screen before it is sent. Tier 3 is off until a key is configured, is never triggered by an upload, and its answers are stored as `llm` guesses that can only fill gaps. A local model remains a legitimate answer and the eval grades one the same way — `--model qwen2.5:3b-instruct` — so this is a swap, not a lock-in.
 
 ---
 

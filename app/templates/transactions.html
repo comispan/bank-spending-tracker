@@ -5,11 +5,33 @@
 
 <h1>{{ txns|length }} transactions</h1>
 <p class="hint">
-  Every card, newest first. The small grey line under a description is the
-  merchant key the categorizer learns against; it is shown only where it
-  differs from what the statement printed. The monthly report arrives in
-  Phase 3 — this list is the rows themselves.
+  {% if filters %}A slice, newest first{% else %}Every card, newest first{% endif %}.
+  The small grey line under a description is the merchant key the categorizer
+  learns against; it is shown only where it differs from what the statement
+  printed. The page number on the right opens the statement PDF this row was
+  read from — every figure in the report traces back to a page (§4).
 </p>
+
+{# A filtered list that looks like the whole list is how a slice gets read as
+   the total. The figure here is the net spend of what is on screen, so a
+   drill-through can be checked against the figure it came from. #}
+{% if filters %}
+<section class="coverage">
+  <p>
+    Filtered to
+    {% for k, v, label in filters %}
+      <span class="src rule">{{ k }}: {{ label }}</span>{{ ' · ' if not loop.last }}
+    {% endfor %}
+    — net spend <strong>{{ shown_minor | money }}</strong>
+  </p>
+  <p class="tiers">
+    <a href="/transactions">clear filters</a>
+    {%- if 'month' in filters | map(attribute=0) %} ·
+      <a href="/months/{{ filters | selectattr(0, 'eq', 'month') | map(attribute=1) | first }}">back to the month</a>
+    {%- endif %}
+  </p>
+</section>
+{% endif %}
 
 {% if stats.total %}
 <section class="coverage">
@@ -20,7 +42,10 @@
     <span class="muted">— transfers, fees and income excluded, refunds netted off</span>
   </p>
   <p class="tiers">
-    {% for src in ['rule', 'memory', 'seed', 'flow', 'user', 'none'] %}
+    {# Tier order, so the row reads as the resolution order it describes. Every
+       source `coverage()` can return has to be listed or its rows vanish from a
+       line whose whole job is to add up to the total. #}
+    {% for src in ['rule', 'memory', 'seed', 'llm', 'flow', 'user', 'none'] %}
       {% if stats.by_source.get(src) %}
         <span class="src {{ src }}">{{ src }}</span> {{ stats.by_source[src] }}
       {% endif %}
@@ -46,7 +71,7 @@
   <thead>
     <tr>
       <th>Date</th><th>Account</th><th>Description</th>
-      <th class="num">Amount</th><th>Dir</th><th>Category</th>
+      <th class="num">Amount</th><th>Dir</th><th>Category</th><th class="num">Page</th>
     </tr>
   </thead>
   <tbody>
@@ -59,9 +84,22 @@
           <span class="merchant">{{ t.merchant_normalized }}</span>
         {% endif %}
       </td>
-      <td class="num {{ t.direction }}">{{ t.amount_sgd_minor | money }}</td>
+      <td class="num {{ t.direction }}">{{ t.amount_sgd_minor | money }}
+        {#- A foreign charge keeps what the statement printed alongside what it
+            billed, converted at the statement's own rate (§4). -#}
+        {% if t.currency and t.currency != 'SGD' %}
+          <span class="merchant">{{ t.amount_minor | money }} {{ t.currency }}
+            {%- if t.fx_rate %} @ {{ t.fx_rate }}{% endif %}</span>
+        {% endif %}
+      </td>
       <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
-      <td>{{ m.category_cell(t, categories, flow_types, '/transactions' + ('?uncategorized=1' if uncategorized_only else '')) }}</td>
+      <td>{{ m.category_cell(t, categories, flow_types, '/transactions' + ('?' + query if query else '')) }}</td>
+      <td class="num muted">
+        {%- if t.source_page -%}
+          <a href="/statements/{{ t.statement_id }}/pdf#page={{ t.source_page }}"
+             title="Open the statement page this row was read from">{{ t.source_page }}</a>
+        {%- endif -%}
+      </td>
     </tr>
   {% endfor %}
   </tbody>

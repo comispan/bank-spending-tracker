@@ -174,7 +174,21 @@ button.tiny { padding: .2rem .5rem; font-size: .72rem; font-weight: 500; }
 .src.memory { background: transparent; color: var(--accent); }
 .src.seed { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
 .src.flow { background: transparent; color: var(--muted); }
+/* Warm like `seed`, because it is the same kind of claim: a guess nobody has
+   checked. The two differ in who guessed, which the label already says. */
+.src.llm { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
 .src.none { background: var(--fail-bg); color: var(--fail); border-color: transparent; }
+
+/* Tier 3, collapsed by default: it is the one outbound request in the app, and
+   opening it is how you read what would be sent before sending it. */
+.tier3 { margin: 1rem 0 1.5rem; padding: .75rem .9rem; border: 1px solid var(--line);
+         border-radius: 6px; }
+.tier3 summary { cursor: pointer; font-weight: 600; }
+.tier3 summary .hint { font-weight: 400; }
+.tier3[open] summary { margin-bottom: .6rem; }
+.tier3 .payload { max-height: 12rem; overflow: auto; padding: .5rem .6rem;
+                  border: 1px solid var(--line); border-radius: 4px;
+                  font-family: var(--mono); font-size: .75rem; white-space: pre-wrap; }
 
 .flowtag { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
 .flowtag.transfer, .flowtag.fee { color: var(--warn); }

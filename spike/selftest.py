@@ -221,6 +221,65 @@ def test_row_parsing() -> None:
     check("a due date is not a transaction", noise["transactions"] == [],
           repr(noise["transactions"]))
 
+    # A foreign charge is three lines, not one: the merchant above, both
+    # figures on the dated line, the rate below (DESIGN.md §4). Parsed as one
+    # line the row reconciles to the cent while its description becomes
+    # `102.67 HKD` — right money, no merchant, and nothing to categorize.
+    fx = (
+        "          25 Jun   26 Jun    Apple                        3.98\n"
+        "\n"
+        "                             Widgetorium\n"
+        "          02 Jul   04 Jul                  102.67 HKD    16.99\n"
+        "                              1 HKD = 0.1655 SGD\n"
+    )
+    got = rows.parse_page(fx, ("2026-06-17", "2026-07-17"), 2026)
+    row = next((t for t in got["transactions"] if t["date"] == "2026-07-02"), None)
+    check("a foreign charge keeps the merchant from the line above",
+          bool(row) and row["description"] == "Widgetorium", repr(row))
+    check("the statement's billed amount is still what reconciles",
+          bool(row) and row["amount"] == "16.99", repr(row and row["amount"]))
+    check("the original amount and currency survive",
+          bool(row) and row["foreign"] == {"amount": "102.67", "currency": "HKD"},
+          repr(row and row["foreign"]))
+    check("the statement's own printed rate is kept, not today's",
+          bool(row) and row["fx_rate"] == "0.1655", repr(row and row["fx_rate"]))
+    # The merchant above is claimed from the gap, never lifted off the row
+    # before it — that would rename one transaction after another.
+    check("the previous transaction keeps its own name",
+          any(t["description"] == "Apple" for t in got["transactions"]),
+          repr([t["description"] for t in got["transactions"]]))
+
+    # A rate for a currency this row was not charged in belongs to something
+    # else on the page, so it is not claimed.
+    mismatch = rows.parse_page(
+        "                             Widgetorium\n"
+        "          02 Jul   04 Jul                  102.67 HKD    16.99\n"
+        "                              1 USD = 1.3400 SGD\n",
+        ("2026-06-17", "2026-07-17"), 2026)
+    check("a rate naming another currency is not this row's rate",
+          mismatch["transactions"][0]["fx_rate"] is None,
+          repr(mismatch["transactions"][0]))
+
+    # Both halves or neither: with no name above, the figure is left where it
+    # is. It is honest about not being a merchant, which an invented name
+    # would not be.
+    orphan = rows.parse_page(
+        "          02 Jul   04 Jul                  102.67 HKD    16.99\n",
+        ("2026-06-17", "2026-07-17"), 2026)
+    check("a foreign figure with no merchant above is left alone",
+          orphan["transactions"][0]["description"] == "102.67 HKD",
+          repr(orphan["transactions"][0]["description"]))
+
+    # A row billed in the statement's own currency has no conversion to record,
+    # so `SGD` must not open the foreign path and go looking for a name above.
+    home = rows.parse_page(
+        "                             Widgetorium\n"
+        "          02 Jul   04 Jul                  16.99 SGD    16.99\n",
+        ("2026-06-17", "2026-07-17"), 2026)
+    check("a figure in the statement's own currency is not a foreign charge",
+          home["transactions"][0]["foreign"]["currency"] is None,
+          repr(home["transactions"][0]))
+
 
     # Trust rules its opening and closing balance into the transaction table,
     # dated like any other row. Counted as purchases they roughly double the
@@ -420,6 +479,20 @@ def test_month_coverage() -> None:
           months.statement_windows([{"first_txn": "2026-06-01"}]) == [],
           repr(months.statement_windows([{"first_txn": "2026-06-01"}])))
 
+    # Two statements on one card can share an end date — a cycle the bank
+    # re-issued, uploaded beside the original, which `file_sha256` does not
+    # catch because the file really is different. Sorting `(end, statement)`
+    # pairs then falls through to comparing the dicts, which do not order, and
+    # the months page raised a TypeError instead of rendering.
+    same_day = [{"period_start": "2026-06-01", "period_end": "2026-06-30", "first_txn": "2026-06-02"},
+                {"period_start": "2026-06-01", "period_end": "2026-06-30", "first_txn": "2026-06-03"}]
+    try:
+        got, raised = months.statement_windows(same_day), None
+    except TypeError as exc:
+        got, raised = None, exc
+    check("two statements ending the same day do not raise",
+          raised is None and got == [("2026-06-01", "2026-06-30")], repr(raised or got))
+
     full = [("2026-08-01", "2026-08-31")]
     check("a fully covered month", months.card_coverage(full, "2026-08")["state"] == "complete")
     check("no window at all is missing",
@@ -472,6 +545,75 @@ def test_month_coverage() -> None:
           months.comparable_days(whole) is None, repr(months.comparable_days(whole)))
     check("a partial month reports its comparable days",
           months.comparable_days(aug) == (1, 14), repr(months.comparable_days(aug)))
+
+    # §4's three-month average. The averaging is arithmetic; what decides
+    # whether the figure means anything is which months are let into it. An
+    # average hides a short month better than a single comparison does — three
+    # part-billed months make one low number with nothing on its face to say
+    # so, and every month measured against it then reads as an overspend.
+    def month_status(ym: str, window: tuple[str, str] | None) -> dict:
+        return months.month_completeness(ym, {"A": [window] if window else []})
+
+    full = [month_status(ym, (f"{ym}-01", f"{ym}-30")) for ym in ("2026-05", "2026-06", "2026-07")]
+    part = month_status("2026-08", ("2026-07-20", "2026-08-14"))
+    usable, short, note = months.trailing_window(part, full)
+    check("three fully billed months make an average",
+          [m["month"] for m in usable] == ["2026-05", "2026-06", "2026-07"] and note is None,
+          repr(([m["month"] for m in usable], note)))
+
+    # The month being averaged against has to cover the days being reported.
+    # A June billed only from the 17th cannot speak for August 1-14, and an
+    # average that includes it is low by however much fell in the first
+    # fortnight — the same trap the delta guards, compounded three times.
+    mixed = [month_status("2026-05", ("2026-05-01", "2026-05-31")),
+             month_status("2026-06", ("2026-06-17", "2026-06-30")),
+             month_status("2026-07", ("2026-07-01", "2026-07-31"))]
+    usable, short, note = months.trailing_window(part, mixed)
+    check("a month that does not cover the days is left out",
+          [m["month"] for m in usable] == ["2026-05", "2026-07"], repr([m["month"] for m in usable]))
+    check("...and is named, so the missing statement can be found",
+          short == ["2026-06"], repr(short))
+
+    # One contributor is not an average, it is last month — which the delta
+    # already shows, and shows honestly.
+    usable, short, note = months.trailing_window(part, mixed[1:])
+    check("a single qualifying month is not called an average",
+          usable == [] and note and "fewer than two" in note, repr((usable, note)))
+
+    # Only the three most recent count, whatever else is stored.
+    many = [month_status(f"2026-{m:02d}", (f"2026-{m:02d}-01", f"2026-{m:02d}-28"))
+            for m in range(1, 8)]
+    usable, _, _ = months.trailing_window(part, many)
+    check("the average looks back three months, not further",
+          [m["month"] for m in usable] == ["2026-05", "2026-06", "2026-07"],
+          repr([m["month"] for m in usable]))
+
+    # A month nothing bounds cannot host a comparison at all, and says which.
+    usable, _, note = months.trailing_window(month_status("2026-08", None), full)
+    check("an unbounded month gets no average and says why",
+          usable == [] and note == "this month cannot be bounded", repr(note))
+
+    # Months are different lengths, and comparing raw day numbers across them
+    # disqualifies every shorter one. A complete June is billed 1-30 and can
+    # never answer "were you billed for days 1-31?" however complete it is, so
+    # a fair June-to-July comparison refused itself and blamed the calendar on
+    # a missing statement. Both the average and the delta ran this test.
+    june = month_status("2026-06", ("2026-06-01", "2026-06-30"))
+    july = month_status("2026-07", ("2026-07-01", "2026-07-31"))
+    check("a complete 30-day month covers a 31-day month's whole window",
+          months.covers_days(june, (1, 31)), repr(months.covered_day_range(june)))
+    check("a complete month is complete regardless of length",
+          june["is_complete"] and july["is_complete"])
+    usable, short, note = months.trailing_window(
+        month_status("2026-08", ("2026-08-01", "2026-08-31")),
+        [month_status("2026-05", ("2026-05-01", "2026-05-31")), june, july])
+    check("a 30-day month is not excluded from a 31-day month's average",
+          [m["month"] for m in usable] == ["2026-05", "2026-06", "2026-07"],
+          repr(([m["month"] for m in usable], short)))
+    # The clamp must not become a way for a genuinely short month to sneak in:
+    # a June billed only to the 20th still fails a 1-31 window.
+    check("a genuinely part-billed month still fails the window",
+          not months.covers_days(month_status("2026-06", ("2026-06-01", "2026-06-20")), (1, 31)))
 
 
 def test_cycle_dates() -> None:
@@ -630,6 +772,35 @@ def test_merchant_normalization() -> None:
     check("a merchant prefix keeps what precedes",
           key("WIDGETCO SG*ORD8821 WIDGETCO.SG") == "widgetco",
           repr(key("WIDGETCO SG*ORD8821 WIDGETCO.SG")))
+
+    # An *unlisted* gateway is the case that shipped wrong: `PROCESSOR_PREFIXES`
+    # can only name the gateways already met, and the one it has not met merges
+    # every shop behind it into a single key. Two real merchants sat under one
+    # three-letter code in the corpus before this. Recognized by shape now — a
+    # short code on the left, a whole shop name on the right.
+    zzz = {key("ZZ**Li Xin Fish Ball SG"), key("ZZ**OLD TEA HUT (CHANGI SG")}
+    check("an unlisted gateway does not merge two shops into its own code",
+          zzz == {"li xin fish ball", "old tea hut (changi"}, repr(zzz))
+    check("a digit-carrying gateway code is one too",
+          key("2C2*ShopBack Chicha Sa GO.2C2P.COM/") == "shopback chicha",
+          repr(key("2C2*ShopBack Chicha Sa GO.2C2P.COM/")))
+
+    # Both halves of the test have to hold, and these are the rows that say why.
+    # A four-letter name is not a code, so `GRAB *TRIP` keeps its left even
+    # though `TRIP` reads like a word...
+    check("a short name is still a name, not a gateway code",
+          key("GRAB *TRIP 4821 SINGAPORE SG") == "grab",
+          repr(key("GRAB *TRIP 4821 SINGAPORE SG")))
+    # ...and one word before the digits is a reference, not a shop, so a code
+    # on the left is not on its own enough to hand the key to the right.
+    check("a code starring one word keeps what precedes",
+          key("M1*DATA 88213 SG") == "m1", repr(key("M1*DATA 88213 SG")))
+    # The whole reason not to simply invert the default: what follows an
+    # unrecognized star is usually a receipt number, and a receipt number is a
+    # new merchant every month.
+    for raw in ["ACME* A-9FO4IOEWWOHCAV Singapore", "ACME****************2269"]:
+        check(f"a starred reference does not become the key ({raw[:12]}…)",
+              key(raw) == "acme", repr(key(raw)))
 
     # One statement prints the issuer's abbreviation and the merchant's own
     # domain in a single description; without the alias that row is two keys.
@@ -856,7 +1027,11 @@ def test_tier3_gate() -> None:
     extraction.
     """
     print("\ntier 3 gate")
+    # `ev` for the scoring helpers, `tier3` for the gate itself — the eval
+    # re-exports the same function, and naming the source here is what stops
+    # this drifting back into testing a copy of it.
     import eval_categories as ev
+    import tier3
 
     asked = ["grab", "bus/mrt", "fairprice"]
 
@@ -919,6 +1094,195 @@ def test_tier3_gate() -> None:
                   ("fairprice", "Groceries")]), asked)
     s = ev.score(answers, truth)
     check("a plausible-but-different answer counts as wrong", s["wrong"] == 1, repr(s))
+
+    # The whole argument for this harness is that it grades the code that runs.
+    # An import that quietly becomes a copy would leave every number above
+    # describing a prompt and a contract nothing uses.
+    check("the eval grades the shipping gate, not a copy of it", ev.gate is tier3.gate)
+    check("...and the shipping prompt and schema", ev.SYSTEM is tier3.SYSTEM
+          and ev.SCHEMA is tier3.SCHEMA)
+
+
+def test_tier3_client() -> None:
+    """Everything around the network call, without making one.
+
+    The API shape is Google's to change; what has to hold here is that a
+    reasoning step is not mistaken for the answer, that a batch too big for one
+    call is still all-or-nothing per chunk, and that an abstention is never
+    written anywhere.
+    """
+    print("\ntier 3 client")
+    import tier3
+
+    # A thinking model's response carries its reasoning in the steps array
+    # alongside the answer. Taking the last text block, or joining all of them,
+    # would feed prose to the gate and fail every batch.
+    body = {"steps": [
+        {"type": "thinking", "content": [{"type": "text", "text": "Let me think..."}]},
+        {"type": "model_output", "content": [{"type": "text", "text": '{"assignments": []}'}]},
+    ]}
+    check("the answer is read past a reasoning step",
+          tier3._output_text(body) == '{"assignments": []}', repr(tier3._output_text(body)))
+
+    check("the SDK's convenience field is honoured when present",
+          tier3._output_text({"output_text": "xyz", "steps": []}) == "xyz")
+
+    check("a response with no output is empty rather than an exception",
+          tier3._output_text({}) == "")
+
+    # What actually leaves the machine: merchant keys, one per line, nothing else.
+    payload = tier3.prompt_payload(["grab", "fairprice"])
+    check("only merchant names are sent", payload == "grab\nfairprice", repr(payload))
+
+    # Batch behaviour, with the network stubbed out. The stub answers the first
+    # chunk properly and drops a merchant from the second, which is the failure
+    # the gate exists for: the good chunk must still be applied and the bad one
+    # must contribute nothing at all.
+    keys = [f"m{i}" for i in range(tier3.BATCH_SIZE + 3)]
+    calls: list[list[str]] = []
+
+    def fake_ask(chunk, model=None, key=None, thinking="low"):
+        calls.append(list(chunk))
+        pairs = [(m, "Dining") for m in chunk]
+        if len(calls) == 2:
+            pairs = pairs[:-1]          # a merchant silently dropped
+        else:
+            pairs[0] = (pairs[0][0], tier3.ABSTAIN)
+        return json.dumps({"assignments": [{"merchant": m, "category": c} for m, c in pairs]})
+
+    real_ask, tier3.ask_gemini = tier3.ask_gemini, fake_ask
+    try:
+        result = tier3.classify(keys, key="test")
+    finally:
+        tier3.ask_gemini = real_ask
+
+    check("a batch larger than one call is split", len(calls) == 2, repr([len(c) for c in calls]))
+    check("no chunk exceeds the batch size",
+          all(len(c) <= tier3.BATCH_SIZE for c in calls))
+    check("the chunk that failed the gate contributes nothing",
+          set(result["assignments"]) == set(keys[:tier3.BATCH_SIZE]) - {"m0"},
+          f'{len(result["assignments"])} assignments')
+    check("...and says why", any("dropped" in p for p in result["problems"]),
+          repr(result["problems"]))
+    check("a good chunk still applies when another fails", result["batches_ok"] == 1)
+    check("an abstention is never returned as an assignment",
+          "m0" not in result["assignments"] and result["abstained"] == ["m0"],
+          repr(result["abstained"]))
+
+    # A missing key must be a clear error, not an empty result that reads like
+    # "the model had nothing to say".
+    #
+    # `api_key()` is stubbed rather than passing key="" and hoping: the empty
+    # string falls through to the real lookup by design, so on a machine that
+    # has a key configured this check would sail past the guard and make a live
+    # API call — which this file promises never to do.
+    real_api_key, tier3.api_key = tier3.api_key, lambda: None
+    try:
+        tier3.ask_gemini(["grab"], model="x")
+        raised = ""
+    except tier3.Tier3Error as e:
+        raised = str(e)
+    except Exception as e:                                   # noqa: BLE001
+        raised = f"wrong exception: {e!r}"
+    finally:
+        tier3.api_key = real_api_key
+    check("no API key raises a Tier3Error naming the variable",
+          "GEMINI_API_KEY" in raised, repr(raised))
+
+    # And the inverse, which is what makes the stub above trustworthy: a
+    # configured key must actually be picked up without being passed in.
+    real_api_key, tier3.api_key = tier3.api_key, lambda: "from-the-environment"
+    try:
+        looked_up = tier3.configured()
+    finally:
+        tier3.api_key = real_api_key
+    check("a configured key is found without being passed in", looked_up)
+
+
+def test_tier3_retries() -> None:
+    """Transient failures, with the network and the clock stubbed out.
+
+    Measured on a free-tier key 2026-08-28: Gemini answers a 43-merchant batch
+    in seconds when it answers, but returns 500 "experiencing high demand" under
+    load and 429 at five requests a minute. Both are temporary and both say so.
+    Giving up on the first one leaves merchants uncategorized for a reason that
+    has nothing to do with the merchants.
+    """
+    print("\ntier 3 retries")
+    import io
+    import urllib.error
+
+    import tier3
+
+    def http_error(code, body=""):
+        return urllib.error.HTTPError(
+            tier3.ENDPOINT, code, "err", {}, io.BytesIO(body.encode()))
+
+    def run(outcomes):
+        """Play `outcomes` in order; returns (result-or-error, calls, slept)."""
+        calls, slept = [], []
+        def fake_urlopen(request, timeout=None):
+            calls.append(1)
+            outcome = outcomes[len(calls) - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return io.BytesIO(outcome.encode())
+        real_open, real_sleep = urllib.request.urlopen, tier3.time.sleep
+        tier3.urllib.request.urlopen = fake_urlopen
+        tier3.time.sleep = lambda s: slept.append(s)
+        try:
+            return tier3.ask_gemini(["grab"], key="k"), len(calls), slept
+        except tier3.Tier3Error as e:
+            return e, len(calls), slept
+        finally:
+            tier3.urllib.request.urlopen = real_open
+            tier3.time.sleep = real_sleep
+
+    good = json.dumps({"steps": [{"type": "model_output", "content": [
+        {"type": "text", "text": '{"assignments": []}'}]}]})
+
+    out, calls, _ = run([http_error(500, "high demand"), good])
+    check("a 500 is retried and the second attempt is used",
+          out == '{"assignments": []}' and calls == 2, f"{out!r} in {calls} call(s)")
+
+    # The quota body carries the real number; guessing either wastes time or
+    # comes back early and spends another request against the same empty quota.
+    out, calls, slept = run([
+        http_error(429, "Quota exceeded. Please retry in 12.5s."), good])
+    check("a 429 waits as long as the API asked", slept == [13.0], repr(slept))
+
+    # A rejected schema or a bad key fails identically forever. Retrying it just
+    # spends quota and delays the message that would let someone fix it.
+    out, calls, _ = run([http_error(400, "bad model id")])
+    check("a 400 is final, not retried",
+          isinstance(out, tier3.Tier3Error) and calls == 1 and "400" in str(out),
+          f"{out!r} in {calls} call(s)")
+
+    out, calls, _ = run([http_error(401, "bad key")])
+    check("a 401 is final, not retried", calls == 1, f"{calls} call(s)")
+
+    # The failure that started all this: a read timeout is not a URLError, so
+    # it used to escape as a stack trace.
+    out, calls, _ = run([TimeoutError("timed out"), good])
+    check("a read timeout is retried, not raised as a traceback",
+          out == '{"assignments": []}' and calls == 2, f"{out!r} in {calls} call(s)")
+
+    out, calls, _ = run([TimeoutError("t")] * tier3.MAX_ATTEMPTS)
+    check("a persistent timeout ends as a Tier3Error saying nothing was stored",
+          isinstance(out, tier3.Tier3Error) and "Nothing was stored" in str(out),
+          repr(out))
+
+    out, calls, _ = run([http_error(500, "high demand")] * tier3.MAX_ATTEMPTS)
+    check("attempts are capped rather than looping",
+          isinstance(out, tier3.Tier3Error) and calls == tier3.MAX_ATTEMPTS,
+          f"{calls} call(s)")
+
+    # A 60s wait is legal per the API and unacceptable inside a web request.
+    out, calls, slept = run([
+        http_error(429, "Please retry in 300s."), good])
+    check("a wait longer than the cap fails fast instead of hanging the page",
+          isinstance(out, tier3.Tier3Error) and slept == [] and calls == 1,
+          f"{out!r} slept={slept}")
 
 
 def test_cli_runs() -> None:
@@ -1035,6 +1399,8 @@ if __name__ == "__main__":
     test_flow_type()
     test_resolution_order()
     test_tier3_gate()
+    test_tier3_client()
+    test_tier3_retries()
     test_cli_runs()
     test_reconciliation()
     test_sanity_checks()

@@ -3,6 +3,7 @@
     python spike/eval_categories.py --list
     python spike/eval_categories.py --model baseline
     python spike/eval_categories.py --model qwen2.5:3b-instruct
+    python spike/eval_categories.py --gemini
     python spike/eval_categories.py --model claude-sonnet-5 --anthropic
 
 Why this exists: DESIGN.md §3 leaves tier 3 as "a model, for the merchants
@@ -12,13 +13,16 @@ a number, using the one piece of ground truth the app already has — the
 merchants **you** categorized by hand, in `merchant_memory` with source
 `memory`.
 
-It measures the thing that would actually ship, gate included. Phase 0's finding
-was that a small model fails *silently*: it returns something plausible and
-empty rather than an error. So every response goes through the same contract
-check tier 3 would use — no invented merchants, none dropped, every category
-inside the fixed thirteen — and a model that scores well but breaks the contract
-is reported as unusable, because it is. That is the qwen2.5 failure mode from
-the Phase 0 notes: correct content, broken format.
+It measures the thing that would actually ship, gate included — literally, since
+the prompt, the schema and the gate are imported from `app/tier3.py` rather than
+copied here. A harness that scores a different prompt than the one that runs is
+measuring a component nobody is going to use. Phase 0's finding was that a small
+model fails *silently*: it returns something plausible and empty rather than an
+error. So every response goes through the same contract check tier 3 uses — no
+invented merchants, none dropped, every category inside the fixed thirteen — and
+a model that scores well but breaks the contract is reported as unusable,
+because it is. That is the qwen2.5 failure mode from the Phase 0 notes: correct
+content, broken format.
 
 Three numbers come out, and the middle one is the one that decides it:
 
@@ -36,9 +40,9 @@ Notes on running local models: pin an `-instruct` tag. A bare tag is often the
 thinking build, which narrates into the response and breaks the format contract
 before the categories are even looked at.
 
-Nothing leaves this machine unless you pass `--anthropic`, and even then only
-the merchant names — no amounts, dates, balances or card numbers, exactly as
-§3 and §7 promise. The script prints what it is about to send.
+Nothing leaves this machine unless you pass `--gemini` or `--anthropic`, and
+even then only the merchant names — no amounts, dates, balances or card numbers,
+exactly as §3 and §7 promise. The script prints what it is about to send.
 """
 
 from __future__ import annotations
@@ -55,50 +59,14 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent / "app"))
 
+import tier3  # noqa: E402
 from categorize import CATEGORIES  # noqa: E402
+# The three things that decide whether a result is trustworthy all come from the
+# shipping module, so grading and running cannot drift apart.
+from tier3 import ABSTAIN, SCHEMA, SYSTEM, gate  # noqa: E402
 
 DB = HERE.parent / "data" / "app.db"
 OUT = HERE / "out"
-ABSTAIN = "unknown"
-ALLOWED = set(CATEGORIES) | {ABSTAIN}
-
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "assignments": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "merchant": {"type": "string"},
-                    "category": {"type": "string", "enum": CATEGORIES + [ABSTAIN]},
-                },
-                "required": ["merchant", "category"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["assignments"],
-    "additionalProperties": False,
-}
-
-SYSTEM = f"""You categorize merchants for a personal spending tracker used in Singapore.
-
-You are given normalized merchant names taken from credit card and bank
-statements. Assign each one exactly one category from this list:
-
-{chr(10).join('- ' + c for c in CATEGORIES)}
-
-Rules:
-- Use "{ABSTAIN}" when you cannot tell what the merchant is. This is expected and
-  is the right answer for an opaque company name. A wrong guess is worse than an
-  honest "{ABSTAIN}", because a wrong guess is stored and silently mislabels
-  someone's spending.
-- Do NOT use "Other" as a way of saying you do not know. "Other" means a real
-  purchase that genuinely fits none of the categories.
-- Return every merchant you were given, spelled exactly as given.
-- Return nothing except the JSON.
-"""
 
 
 # --------------------------------------------------------------- ground truth
@@ -173,6 +141,19 @@ def ask_anthropic(model: str, keys: list[str], effort: str | None) -> str:
     return next((b.text for b in resp.content if b.type == "text"), "")
 
 
+def ask_gemini(model: str, keys: list[str]) -> str:
+    """Straight through the shipping client, so this grades the real thing.
+
+    Including its failure modes: a bad model id or a rejected schema arrives
+    here as a Tier3Error with the API's own message, which is the same thing the
+    app would show.
+    """
+    try:
+        return tier3.ask_gemini(keys, model=model)
+    except tier3.Tier3Error as e:
+        sys.exit(str(e))
+
+
 def ask_baseline(keys: list[str], truth: dict[str, str]) -> str:
     """No model at all: always answer whatever category you use most.
 
@@ -181,52 +162,6 @@ def ask_baseline(keys: list[str], truth: dict[str, str]) -> str:
     """
     common = max(set(truth.values()), key=list(truth.values()).count)
     return json.dumps({"assignments": [{"merchant": k, "category": common} for k in keys]})
-
-
-# ---------------------------------------------------------------------- gate
-
-def gate(raw: str, asked: list[str]) -> tuple[bool, list[str], dict[str, str]]:
-    """The contract tier 3 would enforce before writing anything to the database.
-
-    Deliberately all-or-nothing on the batch, the same way §2.3 refuses to
-    half-trust an extraction. A response that dropped nine merchants is not
-    "mostly fine" — it is a response you cannot reason about.
-    """
-    problems: list[str] = []
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as e:
-        return False, [f"the response is not JSON ({e})"], {}
-
-    items = data.get("assignments") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        return False, ["no 'assignments' array in the response"], {}
-
-    answers: dict[str, str] = {}
-    malformed = duplicates = 0
-    for entry in items:
-        if not isinstance(entry, dict) or "merchant" not in entry or "category" not in entry:
-            malformed += 1
-            continue
-        if entry["merchant"] in answers:
-            duplicates += 1
-        answers[str(entry["merchant"])] = str(entry["category"])
-
-    invented = set(answers) - set(asked)
-    dropped = set(asked) - set(answers)
-    outside = sorted({c for c in answers.values() if c not in ALLOWED})
-
-    if malformed:
-        problems.append(f"{malformed} entr(ies) missing merchant or category")
-    if duplicates:
-        problems.append(f"{duplicates} merchant(s) answered more than once")
-    if invented:
-        problems.append(f"{len(invented)} merchant(s) invented that were never asked about")
-    if dropped:
-        problems.append(f"{len(dropped)} merchant(s) dropped from the answer")
-    if outside:
-        problems.append(f"category value(s) outside the fixed set: {outside[:4]}")
-    return not problems, problems, answers
 
 
 # --------------------------------------------------------------------- score
@@ -270,7 +205,11 @@ def report(name: str, s: dict[str, int], ok: bool, problems: list[str],
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--model", help="an Ollama tag, an Anthropic model id, or 'baseline'")
+    ap.add_argument("--model", help="an Ollama tag, a hosted model id, or 'baseline'")
+    ap.add_argument("--gemini", action="store_true",
+                    help="send the merchant names to the Gemini API (leaves this machine). "
+                         "This is what tier 3 ships with; --model defaults to "
+                         f"{tier3.DEFAULT_MODEL}")
     ap.add_argument("--anthropic", action="store_true",
                     help="send the merchant names to the Anthropic API (leaves this machine)")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
@@ -281,6 +220,12 @@ def main() -> int:
     ap.add_argument("--limit", type=int, help="only grade the first N merchants")
     ap.add_argument("--list", action="store_true", help="show the eval set size and exit")
     args = ap.parse_args()
+
+    # --gemini is the one backend with a sensible default, because it is the one
+    # the app is wired to: naming the model is then optional rather than a thing
+    # you have to look up to run the grader at all.
+    if args.gemini and not args.model:
+        args.model = tier3.model_name()
 
     truth = ground_truth()
     if not truth:
@@ -308,7 +253,12 @@ def main() -> int:
     if args.model == "baseline":
         return 0
 
-    if args.anthropic:
+    if args.gemini:
+        print(f"\n  Sending {len(keys)} merchant names to the Gemini API "
+              f"({args.model}).")
+        print("  No amounts, dates, balances or card numbers are included.")
+        raw_fn = lambda: ask_gemini(args.model, keys)  # noqa: E731
+    elif args.anthropic:
         print(f"\n  Sending {len(keys)} merchant names to the Anthropic API "
               f"({args.model}).")
         print("  No amounts, dates, balances or card numbers are included.")

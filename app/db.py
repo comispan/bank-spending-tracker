@@ -128,10 +128,16 @@ CREATE TABLE IF NOT EXISTS merchant_rule (
 -- row was a purchase or a refund is a property of the row. Learning "Uniqlo is
 -- Shopping" from one purchase must not then declare every future Uniqlo refund
 -- to be spending.
+-- `llm` is tier 3's own source, and it is a third kind of claim rather than a
+-- variety of the other two: a seed is the app's guess about everyone, memory is
+-- this user's decision, and llm is a model's guess about this user's merchant.
+-- Keeping it distinct is what lets the UI show which categories nobody has
+-- actually checked, and what stops a correction being written back as though
+-- the user had made it.
 CREATE TABLE IF NOT EXISTS merchant_memory (
     merchant_normalized TEXT PRIMARY KEY,
     category    TEXT NOT NULL,
-    source      TEXT NOT NULL DEFAULT 'memory' CHECK (source IN ('memory', 'seed')),
+    source      TEXT NOT NULL DEFAULT 'memory' CHECK (source IN ('memory', 'seed', 'llm')),
     hit_count   INTEGER NOT NULL DEFAULT 0,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -157,6 +163,41 @@ MIGRATIONS: list[tuple[str, str]] = [
 ]
 
 
+def widen_memory_source(conn: sqlite3.Connection) -> bool:
+    """Let `merchant_memory.source` hold 'llm' on a database made before tier 3.
+
+    SQLite cannot alter a CHECK constraint, so the table has to be rebuilt —
+    the one migration here that ADD COLUMN cannot express. Guarded on the stored
+    DDL rather than a version number, so it runs exactly once and is a no-op on
+    a fresh database that already has the constraint from SCHEMA.
+
+    Nothing references this table by foreign key, which is what makes the
+    rebuild a local operation rather than the full twelve-step dance.
+    """
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merchant_memory'"
+    ).fetchone()
+    if not ddl or "'llm'" in ddl["sql"]:
+        return False
+
+    conn.executescript("""
+        CREATE TABLE merchant_memory_new (
+            merchant_normalized TEXT PRIMARY KEY,
+            category    TEXT NOT NULL,
+            source      TEXT NOT NULL DEFAULT 'memory'
+                        CHECK (source IN ('memory', 'seed', 'llm')),
+            hit_count   INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO merchant_memory_new
+            SELECT merchant_normalized, category, source, hit_count, updated_at
+            FROM merchant_memory;
+        DROP TABLE merchant_memory;
+        ALTER TABLE merchant_memory_new RENAME TO merchant_memory;
+    """)
+    return True
+
+
 def init() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
@@ -165,6 +206,7 @@ def init() -> None:
             existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+        widen_memory_source(conn)
         conn.commit()
 
 
@@ -220,11 +262,11 @@ def insert_transactions(conn: sqlite3.Connection, statement_id: int, account_id:
     conn.executemany(
         """INSERT INTO txn (account_id, statement_id, txn_date, posted_date,
                             description_raw, merchant_normalized,
-                            amount_minor, currency, amount_sgd_minor,
+                            amount_minor, currency, amount_sgd_minor, fx_rate,
                             direction, source_page, reference, dedup_key)
            VALUES (:account_id, :statement_id, :txn_date, :posted_date,
                    :description_raw, :merchant_normalized,
-                   :amount_minor, :currency, :amount_sgd_minor,
+                   :amount_minor, :currency, :amount_sgd_minor, :fx_rate,
                    :direction, :source_page, :reference, :dedup_key)""",
         [dict(r, account_id=account_id, statement_id=statement_id) for r in rows],
     )
@@ -249,6 +291,54 @@ def backfill_periods(conn: sqlite3.Connection) -> int:
             updates.append((ctx.period[0], ctx.period[1], ctx.statement_date, row["id"]))
     conn.executemany(
         """UPDATE statement SET period_start = ?, period_end = ?, statement_date = ?
+           WHERE id = ?""", updates)
+    return len(updates)
+
+
+def backfill_foreign_amounts(conn: sqlite3.Connection) -> int:
+    """Recover merchant, original amount and rate on rows parsed before the split.
+
+    A foreign charge used to store its own figure as the description — `102.67
+    HKD` where the merchant should be — because the issuer prints the name a
+    line above and the rate a line below (§4). Those rows reconcile to the cent
+    and can never be categorized, which is the quietest kind of wrong.
+
+    Replayed off `page_text` for the same reason as `backfill_periods`, and
+    matched on `(date, amount)` within the statement rather than on row order,
+    because a re-parse is free to produce a different number of rows than the
+    one stored. Only rows whose description still *is* the foreign figure are
+    touched: anything the user has since corrected by hand is left alone.
+    """
+    updates = []
+    for stmt in conn.execute(
+        """SELECT DISTINCT s.id, s.page_text FROM statement s
+           JOIN txn t ON t.statement_id = s.id
+           WHERE t.fx_rate IS NULL AND s.page_text IS NOT NULL"""
+    ):
+        pages = json.loads(stmt["page_text"] or "[]")
+        if not pages:
+            continue
+        ctx = rows.document_context(pages)
+        fixed = {}
+        for page in pages:
+            for t in rows.parse_page(page, ctx.period, ctx.year, ctx.statement_date)["transactions"]:
+                if (t.get("foreign") or {}).get("currency"):
+                    fixed[(t["date"], t["amount"])] = t
+        if not fixed:
+            continue
+        for row in conn.execute(
+            """SELECT id, txn_date, amount_sgd_minor, description_raw FROM txn
+               WHERE statement_id = ? AND fx_rate IS NULL""", (stmt["id"],)
+        ):
+            t = fixed.get((row["txn_date"], str(to_major(row["amount_sgd_minor"]))))
+            if not t or not rows._foreign_amount(row["description_raw"]):
+                continue
+            updates.append((t["description"], merchants.normalize(t["description"]),
+                            to_minor(t["foreign"]["amount"]), t["foreign"]["currency"],
+                            t.get("fx_rate"), row["id"]))
+    conn.executemany(
+        """UPDATE txn SET description_raw = ?, merchant_normalized = ?,
+                          amount_minor = ?, currency = ?, fx_rate = ?
            WHERE id = ?""", updates)
     return len(updates)
 
@@ -367,6 +457,31 @@ def remember(conn: sqlite3.Connection, merchant: str, category: str) -> None:
                updated_at = excluded.updated_at""",
         (merchant, category),
     )
+
+
+def remember_llm(conn: sqlite3.Connection, assignments: dict[str, str]) -> int:
+    """Write tier 3's answers into memory as guesses, filling gaps only.
+
+    `INSERT OR IGNORE` is doing the same load-bearing work it does in
+    `seed_memory`, and for a stronger reason: a model must never overwrite
+    something the user decided. Tier 3 is only ever asked about merchants
+    nothing knows, so in practice every row here is a gap — the OR IGNORE is
+    what makes that a property of the schema rather than of the caller getting
+    the query right.
+
+    Stored as `llm`, never `memory`. The distinction is the whole safety
+    argument for letting a model write at all: these categories are visible as
+    unreviewed on /merchants and /rules, and the moment the user confirms or
+    corrects one it becomes a real `memory` entry through `remember()`.
+    """
+    if not assignments:
+        return 0
+    cur = conn.executemany(
+        """INSERT OR IGNORE INTO merchant_memory (merchant_normalized, category, source)
+           VALUES (?, ?, 'llm')""",
+        list(assignments.items()),
+    )
+    return cur.rowcount
 
 
 def set_category(conn: sqlite3.Connection, txn_id: int, category: str | None,
@@ -605,13 +720,17 @@ def month_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             row["not_comparable"] = "this month cannot be bounded"
             continue
 
-        days = row["comparable_days"] or (1, 31)
+        days = row["comparable_days"] or (1, int(row["end"][8:10]))
         prior_days = months.covered_day_range(prior)
         if prior_days is None:
             gap = ", ".join(prior["missing"] + prior["gaps"]) or "a card"
             row["not_comparable"] = f"{prior['month']} has no statement covering it for {gap}"
             continue
-        if not (prior_days[0] <= days[0] and days[1] <= prior_days[1]):
+        # `covers_days` rather than a raw day-number comparison: a complete
+        # June is billed 1–30 and can never satisfy "days 1–31", so a fair
+        # comparison between two complete months used to refuse itself and
+        # blame the calendar on a missing statement.
+        if not months.covers_days(prior, days):
             row["not_comparable"] = (
                 f"{prior['month']} is only billed for days "
                 f"{prior_days[0]}–{prior_days[1]}, so the same days cannot be compared")
@@ -620,7 +739,82 @@ def month_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         base = spend_in_days(prior["month"], row["comparable_days"])
         row["prior_comparable"] = base
         row["delta_minor"] = row["spend_comparable"] - base
+
+    # The three-month average §4 asks for. Which months are allowed into it is
+    # the part that decides whether the figure means anything, so that decision
+    # lives in `months.trailing_window` beside the rest of the coverage
+    # reasoning and is tested as a pure function.
+    for i, row in enumerate(out):
+        usable, short, note = months.trailing_window(row, out[:i])
+        row["trailing_months"] = [m["month"] for m in usable]
+        row["trailing_short"] = short
+        row["trailing_note"] = note
+        row["trailing_avg_minor"] = None if not usable else round(
+            sum(spend_in_days(m["month"], row["comparable_days"]) for m in usable) / len(usable))
     return list(reversed(out))
+
+
+def month_notable(conn: sqlite3.Connection, ym: str, trailing: list[str],
+                  days: tuple[int, int] | None) -> dict[str, Any]:
+    """§4's "new and unusual": merchants never seen, categories running hot.
+
+    Two questions with different standards of proof, deliberately not merged.
+
+    **A new merchant** is one with no earlier row anywhere in the data. That is
+    honest without needing a complete month, but it is "new to the statements
+    you have uploaded" and not "new to your spending" — an unbilled fortnight
+    can hide a first visit. The UI says so rather than the name implying it.
+
+    **A category running hot** needs an average to be hot against, so it is
+    held to the trailing test in `month_report`: the same days, in months
+    billed across them. Given nothing qualifying, nothing is reported — a
+    category flagged against a part-billed average is flagged for being
+    compared with half a month, which is a fact about the upload and not about
+    the spending.
+    """
+    start, end = months.month_bounds(ym)
+    spend = """CASE WHEN t.flow_type='spend' THEN t.amount_sgd_minor
+                    WHEN t.flow_type='refund' THEN -t.amount_sgd_minor ELSE 0 END"""
+
+    new_merchants = conn.execute(
+        f"""SELECT t.merchant_normalized AS label, COUNT(*) AS n,
+                   COALESCE(SUM({spend}), 0) AS v
+            FROM txn t
+            WHERE t.txn_date BETWEEN ? AND ? AND t.merchant_normalized <> ''
+              AND NOT EXISTS (SELECT 1 FROM txn p
+                              WHERE p.merchant_normalized = t.merchant_normalized
+                                AND p.txn_date < ?)
+            GROUP BY 1 HAVING v > 0 ORDER BY v DESC LIMIT 12""",
+        (start, end, start)).fetchall()
+
+    hot: list[dict[str, Any]] = []
+    if len(trailing) >= 2 and days:
+        day_clause = "AND CAST(substr(t.txn_date, 9, 2) AS INTEGER) BETWEEN ? AND ?"
+        now = {r["label"]: r["v"] for r in conn.execute(
+            f"""SELECT t.category AS label, COALESCE(SUM({spend}), 0) AS v FROM txn t
+                WHERE substr(t.txn_date, 1, 7) = ? {day_clause}
+                  AND t.category IS NOT NULL GROUP BY 1""",
+            (ym, days[0], days[1]))}
+        marks = ",".join("?" * len(trailing))
+        before: dict[str, int] = {}
+        for r in conn.execute(
+            f"""SELECT t.category AS label, COALESCE(SUM({spend}), 0) AS v FROM txn t
+                WHERE substr(t.txn_date, 1, 7) IN ({marks}) {day_clause}
+                  AND t.category IS NOT NULL GROUP BY 1""",
+            (*trailing, days[0], days[1])):
+            before[r["label"]] = r["v"]
+        for label, value in now.items():
+            base = before.get(label, 0) / len(trailing)
+            # A category with no history is new rather than hot, and dividing
+            # by its absent average is how a $3 first coffee becomes an
+            # infinite overspend. It belongs to the merchant list above.
+            if base <= 0 or value <= base * 1.5:
+                continue
+            hot.append({"label": label, "v": value, "base": round(base),
+                        "over": round(100 * (value - base) / base)})
+        hot.sort(key=lambda h: -h["over"])
+
+    return {"new_merchants": new_merchants, "hot_categories": hot}
 
 
 def month_detail(conn: sqlite3.Connection, ym: str) -> dict[str, Any]:

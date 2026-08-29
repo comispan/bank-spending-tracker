@@ -42,13 +42,30 @@
   {%- endif %}
 </p>
 
+{# §4's "vs 3-month average", held to the same standard as the delta above:
+   an average over part-billed months is a low number with nothing on its face
+   to say so, and every month compared against it then reads as an overspend. #}
+<p class="hint">
+  {% if m.trailing_avg_minor is not none %}
+    Against the {{ m.trailing_months | length }}-month average of
+    <strong>{{ m.trailing_avg_minor | money }}</strong>
+    ({{ m.trailing_months | join(', ') }}, over the same days), this month is
+    <strong>{{ '+' if m.spend_comparable > m.trailing_avg_minor
+       }}{{ (m.spend_comparable - m.trailing_avg_minor) | money }}</strong>.
+  {% else %}
+    No three-month average yet — {{ m.trailing_note }}. An average over
+    part-billed months is quietly low, and everything compared against it then
+    looks like an overspend.
+  {% endif %}
+</p>
+
 <h2>By category</h2>
 <table>
   <thead><tr><th>Category</th><th></th><th class="num">Spend</th><th class="num">Rows</th></tr></thead>
   <tbody>
   {% for r in d.by_category %}
     <tr>
-      <td>{{ r.label }}</td>
+      <td><a href="/transactions?month={{ m.month }}&category={{ r.label | urlencode }}">{{ r.label }}</a></td>
       <td class="barcell">
         <span class="bar{{ ' unknown' if r.label == '(uncategorized)' }}"
               style="width: {{ (100 * r.v / biggest) | round | int if biggest > 0 and r.v > 0 else 0 }}%"></span>
@@ -66,7 +83,11 @@
   <tbody>
   {% for r in d.by_card %}
     <tr>
-      <td>{{ r.label }}</td>
+      <td>
+        {%- if cards.get(r.label) -%}
+          <a href="/transactions?month={{ m.month }}&account={{ cards[r.label] }}">{{ r.label }}</a>
+        {%- else -%}{{ r.label }}{%- endif -%}
+      </td>
       <td class="num">{{ r.v | money }}</td>
       <td class="num muted">{{ r.n }}</td>
       <td>
@@ -87,12 +108,52 @@
   <thead><tr><th>Merchant</th><th class="num">Spend</th><th class="num">Rows</th></tr></thead>
   <tbody>
   {% for r in d.by_merchant %}
-    <tr><td><code>{{ r.label }}</code></td>
+    <tr><td><a href="/transactions?month={{ m.month }}&merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a></td>
         <td class="num">{{ r.v | money }}</td>
         <td class="num muted">{{ r.n }}</td></tr>
   {% endfor %}
   </tbody>
 </table>
+
+<h2>New and unusual</h2>
+{% if notable.new_merchants %}
+<p class="hint">
+  Merchants with no earlier row in the statements uploaded so far. That is not
+  quite "never seen before" — an unbilled fortnight can hide a first visit — so
+  it says what it can actually stand behind.
+</p>
+<table>
+  <thead><tr><th>First seen this month</th><th class="num">Spend</th><th class="num">Rows</th></tr></thead>
+  <tbody>
+  {% for r in notable.new_merchants %}
+    <tr><td><a href="/transactions?month={{ m.month }}&merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a></td>
+        <td class="num">{{ r.v | money }}</td>
+        <td class="num muted">{{ r.n }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="hint">Every merchant this month has appeared before.</p>
+{% endif %}
+
+{% if notable.hot_categories %}
+<table>
+  <thead><tr><th>Running hot</th><th class="num">This month</th><th class="num">Average</th><th class="num">Over</th></tr></thead>
+  <tbody>
+  {% for r in notable.hot_categories %}
+    <tr><td><a href="/transactions?month={{ m.month }}&category={{ r.label | urlencode }}">{{ r.label }}</a></td>
+        <td class="num">{{ r.v | money }}</td>
+        <td class="num muted">{{ r.base | money }}</td>
+        <td class="num">+{{ r.over }}%</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% elif m.trailing_avg_minor is none %}
+<p class="hint">
+  No category can be called unusual yet: that needs an average to be unusual
+  against, and {{ m.trailing_note }}.
+</p>
+{% endif %}
 
 {% if d.excluded %}
 <h2>Not counted as spending</h2>
@@ -105,7 +166,7 @@
   <thead><tr><th>Flow</th><th class="num">Amount</th><th class="num">Rows</th></tr></thead>
   <tbody>
   {% for r in d.excluded %}
-    <tr><td><span class="flowtag {{ r.label }}">{{ r.label }}</span></td>
+    <tr><td><a href="/transactions?month={{ m.month }}&flow={{ r.label | urlencode }}"><span class="flowtag {{ r.label }}">{{ r.label }}</span></a></td>
         <td class="num">{{ r.v | money }}</td>
         <td class="num muted">{{ r.n }}</td></tr>
   {% endfor %}

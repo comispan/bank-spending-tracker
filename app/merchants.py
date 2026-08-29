@@ -24,6 +24,12 @@ Cutting at the first token that cannot be part of a name generalizes better
 than enumerating suffixes, because the suffixes are per-issuer and the names
 are not. Same reasoning as §2.2 parsing rows by shape rather than by bank.
 
+A star is the one place that shape reverses — `GATEWAY*THE REAL SHOP` puts the
+merchant on the right — so `_resolve_star` reads both sides before choosing.
+It is read by shape for the same reason: a list of known gateways only ever
+names the ones already met, and the one it has not met yet is the one that
+merges two shops into a single key.
+
 Two keys come out of here, and tier 2 should try them in this order:
 
     normalize("STARBUCKS @ RAFFLES CITY SG")  -> "starbucks raffles city"
@@ -54,12 +60,9 @@ COUNTRY_TOKENS = {
 }
 
 # Payment processors that print themselves in front of the real merchant, so
-# the merchant is what *follows* the star. Deliberately short. Taking what
-# precedes is the right default: of the 16 starred rows in the corpus, at least
-# 11 name the merchant on the left (`GRAB *TRIP`, `AMZN Mktp SG*RT4G91`,
-# `SIMBATELECOM*...`) and only one looks like a gateway. A wrong "keep the
-# left" gives a coarse key; a wrong "keep the right" gives a receipt number,
-# which is a new key every month.
+# the merchant is what *follows* the star. Deliberately short, and no longer
+# the only way a gateway is recognized — `_resolve_star` also reads the shape
+# of both sides, because this list can only ever name the gateways already met.
 PROCESSOR_PREFIXES = {"sq", "paypal", "pp", "pypl", "stripe"}
 
 # A domain-shaped first token names the merchant outright, and everything after
@@ -158,14 +161,84 @@ def cluster_order(entries: list[dict], weight: str = "weight") -> list[dict]:
 # ------------------------------------------------------------------ pieces
 
 def _resolve_star(text: str) -> str:
-    """Split `MERCHANT*junk` / `PROCESSOR*MERCHANT` at the first star."""
+    """Split `MERCHANT*reference` / `GATEWAY*MERCHANT` at the first star.
+
+    Both shapes are common and they mean opposite things, so the side to keep
+    has to be *read* rather than assumed. Keeping the left is still the default
+    — of the 16 starred rows in the corpus 11 name the merchant there — but a
+    flat default is what put `SMP**Li Xin Fish Ball` and `SMP**OLD TEA HUT`
+    under one key. Two merchants merged into one key is wrong data, quietly,
+    and it is the same failure the two-key scheme in this module's docstring
+    exists to prevent, arriving from the other direction.
+
+    Inverting the default is not the fix; it trades four wrong keys for eight.
+    `GRAB *TRIP 4821` becomes `trip`, `SIMBATELECOM****2269` becomes `2269`
+    and `AMZN Mktp SG*RT4G91` becomes `rt4g91 amazon.sg` — all keys that change
+    next month, which is worse than a coarse one that does not.
+
+    What actually separates them is shape, on both sides at once:
+
+      - a gateway is a *code*, not a name — `SMP`, `GRB`, `2C2`, against
+        `GRAB`, `SIMBATELECOM`, `AMZN MKTP`; and
+      - a gateway hands over the *whole shop name*, two words or more, where a
+        merchant starring its own reference gives one word at most before the
+        digits start.
+
+    Both must hold before the right side wins, which is deliberately strict:
+    the corpus gateways hand over three or four name words, so there is margin,
+    and a false flip costs a receipt-number key. `PROCESSOR_PREFIXES` still
+    overrides the pair, because a known gateway may hand over a single word.
+    """
     before, sep, after = text.partition("*")
     if not sep:
         return text
     left = _drop_trailing_place(before.split())
     if not left or " ".join(left) in PROCESSOR_PREFIXES:
         return after.strip() or before.strip()
+    if _is_gateway_code(left) and _names_a_merchant(after):
+        return after.strip()
     return " ".join(left)
+
+
+def _is_gateway_code(left: list[str]) -> bool:
+    """Is what precedes the star a code rather than somebody's name?
+
+    One token, and either no longer than three characters or carrying a digit.
+    That covers the gateways in the corpus — `SMP`, `GRB`, `2C2` — while
+    `GRAB` (four letters), `SIMBATELECOM` and the two-token `AMZN MKTP` are
+    names and fail it, which is what keeps them on the left where they belong.
+    """
+    if len(left) != 1:
+        return False
+    token = left[0].strip(EDGE_PUNCT)
+    return bool(token) and (len(token) <= 3 or any(c.isdigit() for c in token))
+
+
+def _names_a_merchant(after: str) -> bool:
+    """Does what follows the star open with a shop name, not a reference?
+
+    Two name-shaped tokens before the first junk one or the first place. A
+    gateway prints the whole name — `Li Xin Fish Ball`, `Dunkin Donuts Paya` —
+    where a merchant that stars its own reference gets one word at the very
+    most: `GRAB *TRIP 4821` has `trip` and then numbers.
+
+    A place counts as the end of the name rather than part of it, so
+    `XX*Uniqlo SG` stays on the left. That is the conservative call and it is
+    revisitable — no row in the corpus takes that shape, and the reason to
+    prefer it today is that `M1*Data SG` looks identical and `M1` is a real
+    Singapore merchant.
+    """
+    names = 0
+    for token in after.split():
+        token = token.strip(EDGE_PUNCT)
+        if not token or PUNCT_ONLY.match(token):
+            continue
+        if _is_junk(token) or token in CITY_TOKENS | COUNTRY_TOKENS:
+            return False
+        names += 1
+        if names >= 2:
+            return True
+    return False
 
 
 def _drop_trailing_place(tokens: list[str]) -> list[str]:

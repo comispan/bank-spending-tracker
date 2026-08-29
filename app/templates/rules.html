@@ -14,7 +14,7 @@
 {% if stats.total %}
 <section class="coverage">
   <p class="tiers">
-    {% for src in ['rule', 'memory', 'seed', 'flow', 'user', 'none'] %}
+    {% for src in ['rule', 'memory', 'seed', 'llm', 'flow', 'user', 'none'] %}
       {% if stats.by_source.get(src) %}
         <span class="src {{ src }}">{{ src }}</span> {{ stats.by_source[src] }}
       {% endif %}
@@ -83,9 +83,12 @@
 <h2>Merchant memory <span class="muted">tier 2</span></h2>
 <p class="hint">
   <span class="src seed">seed</span> is a guess shipped with the app;
+  <span class="src llm">llm</span> is a guess a model made about your merchants
+  (<a href="/merchants">tier 3</a>) and nobody has checked;
   <span class="src memory">memory</span> is a decision you made. Rows counts how
   many transactions each one currently answers — a seed matching nothing is a
   guess about a merchant you do not have, and costs nothing to leave.
+  Correcting a guess of either kind turns it into a decision, permanently.
 </p>
 
 {% if not memory %}

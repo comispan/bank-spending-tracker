@@ -66,7 +66,12 @@ def statement_windows(statements: list[dict]) -> list[tuple[str, str]]:
         end = s.get("period_end") or s.get("statement_date")
         if end:
             dated.append((end, s))
-    dated.sort()
+    # By the date alone. Sorting the pairs lets Python fall through to
+    # comparing the dicts when two statements on one card share an end date —
+    # a re-issued cycle uploaded alongside the original, which `file_sha256`
+    # does not catch because the file genuinely differs — and dicts do not
+    # order, so the months page raised instead of rendering.
+    dated.sort(key=lambda pair: pair[0])
 
     windows: list[tuple[str, str]] = []
     previous_end: str | None = None
@@ -190,3 +195,57 @@ def comparable_days(status: dict) -> tuple[int, int] | None:
     if status["is_complete"] or not status["covered_from"]:
         return None
     return int(status["covered_from"][8:10]), int(status["covered_through"][8:10])
+
+
+def covers_days(status: dict, days: tuple[int, int]) -> bool:
+    """Is this month billed across `days`, allowing for its own length?
+
+    The clamp is the whole point. Comparing raw day numbers across months
+    silently disqualifies every shorter month: a complete June is billed
+    1–30, and asking whether it covers "days 1–31" of a 31-day month is a
+    question it can never answer yes to however complete it is. That made a
+    perfectly fair June-to-July comparison refuse itself, with a reason —
+    "only billed for days 1–30" — that reads like a missing statement and is
+    really just the calendar.
+    """
+    covered = covered_day_range(status)
+    if covered is None:
+        return False
+    last = int(status["end"][8:10])
+    return covered[0] <= days[0] and min(days[1], last) <= covered[1]
+
+
+def trailing_window(status: dict, earlier: list[dict]) -> tuple[list[dict], list[str], str | None]:
+    """Which earlier months may contribute to a trailing average, and why not.
+
+    §4 asks for "vs 3-month average". The averaging is the easy half; deciding
+    what is allowed into it is the half that decides whether the number means
+    anything. An average launders part-billed months better than a single
+    comparison does — three short months produce one low figure with nothing on
+    its face to say it is short, and every month measured against it then reads
+    as an overspend.
+
+    So a month contributes only if it is billed across at least the days being
+    reported, and the caller measures it over exactly those days. Two
+    contributors minimum: an "average" of one month is the previous month,
+    which the delta already shows and names honestly.
+
+    Returns `(usable, short, note)` — the months that qualify, the names of
+    those that do not, and a reason when there are too few. The reason is
+    printed, so it doubles as an instruction for which statement to go find.
+    """
+    days = comparable_days(status) or ((1, int(status["end"][8:10])) if status["is_complete"] else None)
+    if days is None:
+        return [], [], "this month cannot be bounded"
+
+    usable, short = [], []
+    for month in earlier[-3:]:
+        if covers_days(month, days):
+            usable.append(month)
+        else:
+            short.append(month["month"])
+    if len(usable) < 2:
+        return [], short, (
+            f"fewer than two earlier months are billed across days {days[0]}–{days[1]}"
+            + (f" — {', '.join(short)} fall short" if short else ""))
+    return usable, short, None
