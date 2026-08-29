@@ -32,7 +32,9 @@
                      'rule': 'matched one of your rules',
                      'memory': 'learned from a decision you made',
                      'seed': 'a guess shipped with the app — correct it if it is wrong',
-                     'flow': 'not spending, so the category follows from what kind of row it is'}[t.category_source] }}"
+                     'llm': 'a model guessed this and nobody has checked it — correct it if it is wrong',
+                     'flow': 'not spending, so the category follows from what kind of row it is'
+                    }.get(t.category_source, t.category_source) }}"
     >{{ t.category_source }}</span>
   {% endif %}
 </form>

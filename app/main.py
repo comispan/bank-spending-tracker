@@ -20,6 +20,7 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -32,6 +33,7 @@ import categorize  # noqa: E402
 import db          # noqa: E402
 import merchants   # noqa: E402
 import parsing     # noqa: E402
+import tier3       # noqa: E402
 
 HERE = Path(__file__).parent
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -50,11 +52,13 @@ def startup() -> None:
     # that no longer exist. Counts, never descriptions: DESIGN.md §7.
     with db.connect() as conn:
         periods = db.backfill_periods(conn)
+        foreign = db.backfill_foreign_amounts(conn)
         moved = db.renormalize_merchants(conn)
         seeded = db.seed_memory(conn)
         recategorized = db.recategorize_all(conn)
         conn.commit()
     for label, n in (("statement periods re-read", periods),
+                     ("foreign charges split", foreign),
                      ("merchant keys recomputed", moved),
                      ("merchants seeded", seeded),
                      ("transactions recategorized", recategorized)):
@@ -176,12 +180,17 @@ async def upload(file: UploadFile, password: str = Form("")):
                 # Stored rather than computed on read so a query can group by it,
                 # and recomputed on boot when the rules change.
                 "merchant_normalized": merchants.normalize(t["description"]),
-                "amount_minor": db.to_minor(t["amount"]),
-                "currency": currency,
-                # Statements bill in their own currency, so the printed amount
-                # is already SGD here. A foreign-currency subline lives in the
-                # description and is not yet split out — see DESIGN.md §4.
+                # §5's two money columns: what the statement printed, and what
+                # it billed. They differ only on a foreign charge, where the
+                # parser recovers the original figure and the statement's *own*
+                # printed rate (§4) — never today's rate, because that is not
+                # the rate the money changed at. Both figures come off the same
+                # line, so the SGD side is what reconciles either way.
+                "amount_minor": db.to_minor(
+                    (t.get("foreign") or {}).get("amount") or t["amount"]),
+                "currency": (t.get("foreign") or {}).get("currency") or currency,
                 "amount_sgd_minor": db.to_minor(t["amount"]),
+                "fx_rate": t.get("fx_rate"),
                 "direction": t["direction"],
                 "source_page": t.get("source_page"),
                 "reference": t.get("reference"),
@@ -273,9 +282,22 @@ def delete(statement_id: int):
 
 @app.get("/transactions", response_class=HTMLResponse)
 def all_transactions(request: Request, error: str | None = None, notice: str | None = None,
-                     uncategorized: int = 0, month: str | None = None):
+                     uncategorized: int = 0, month: str | None = None,
+                     category: str | None = None, account: int | None = None,
+                     merchant: str | None = None, flow: str | None = None):
+    """The rows themselves, and where every figure in the report drills through to.
+
+    §4 asks that every number trace back to the transactions behind it, which
+    makes this page the other end of four different links. The filters are
+    therefore shown, not just applied: a filtered list that looks identical to
+    the whole list is how a total gets read as the total when it is a slice.
+    """
     if month and not re.fullmatch(r"\d{4}-\d{2}", month):
         month = None
+    if category and category not in categorize.CATEGORIES and category != "(uncategorized)":
+        category = None
+    if flow and flow not in categorize.FLOW_TYPES:
+        flow = None
     with db.connect() as conn:
         clauses, args = [], []
         if uncategorized:
@@ -283,6 +305,20 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
         if month:
             clauses.append("substr(t.txn_date, 1, 7) = ?")
             args.append(month)
+        if category == "(uncategorized)":
+            clauses.append("t.category IS NULL")
+        elif category:
+            clauses.append("t.category = ?")
+            args.append(category)
+        if account:
+            clauses.append("t.account_id = ?")
+            args.append(account)
+        if merchant:
+            clauses.append("t.merchant_normalized = ?")
+            args.append(merchant)
+        if flow:
+            clauses.append("t.flow_type = ?")
+            args.append(flow)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         txns = conn.execute(
             f"""SELECT t.*, a.issuer, a.last4 FROM txn t
@@ -291,12 +327,43 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
                 ORDER BY t.txn_date DESC, t.id DESC""", args
         ).fetchall()
         stats = db.coverage(conn)
+        account_name = conn.execute(
+            """SELECT issuer || CASE WHEN last4 IS NULL THEN '' ELSE ' ····' || last4 END
+                 AS label FROM account WHERE id = ?""", (account,)).fetchone() if account else None
+    # Net spend of exactly what is on screen, so a drill-through from a figure
+    # in the report can be checked against the figure it came from. The
+    # whole-corpus coverage line below it answers a different question and is
+    # kept separate rather than quietly rescoped.
+    shown = sum(t["amount_sgd_minor"] if t["flow_type"] == "spend"
+                else -t["amount_sgd_minor"] if t["flow_type"] == "refund" else 0
+                for t in txns)
+    active = [("month", month, month), ("category", category, category),
+              ("account", account, account_name["label"] if account_name else None),
+              ("merchant", merchant, merchant), ("flow", flow, flow)]
     return templates.TemplateResponse(request, "transactions.html", {
         "txns": txns, "stats": stats, "uncategorized_only": bool(uncategorized),
-        "month_filter": month,
+        "filters": [(k, v, label) for k, v, label in active if v],
+        "query": urlencode({k: v for k, v in
+                            [("month", month), ("category", category), ("account", account),
+                             ("merchant", merchant), ("flow", flow),
+                             ("uncategorized", uncategorized or None)] if v}),
+        "shown_minor": shown,
         "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
         "error": error, "notice": notice,
     })
+
+
+def redirect(path: str, **params: str | None) -> RedirectResponse:
+    """A 303 back to `path` carrying notice/error text.
+
+    Properly encoded rather than the `.replace(' ', '+')` used by the older
+    routes, because the messages here can carry an API error body — colons,
+    quotes, ampersands and all — and one stray `&` would silently truncate the
+    message the user needs to read.
+    """
+    query = urlencode({k: v for k, v in params.items() if v})
+    joiner = "&" if "?" in path else "?"
+    return RedirectResponse(f"{path}{joiner}{query}" if query else path, status_code=303)
 
 
 def safe_back(back: str) -> str:
@@ -360,9 +427,13 @@ def month_view(request: Request, ym: str):
         if not row:
             return RedirectResponse("/months?error=No+transactions+that+month", status_code=303)
         detail = db.month_detail(conn, ym)
+        notable = db.month_notable(conn, ym, row["trailing_months"], row["comparable_days"])
+        cards = {r["label"]: r["id"] for r in conn.execute(
+            """SELECT id, issuer || CASE WHEN last4 IS NULL THEN '' ELSE ' ····' || last4 END
+                 AS label FROM account""")}
     biggest = max((r["v"] for r in detail["by_category"]), default=0)
     return templates.TemplateResponse(request, "month.html", {
-        "m": row, "d": detail, "biggest": biggest,
+        "m": row, "d": detail, "biggest": biggest, "notable": notable, "cards": cards,
     })
 
 
@@ -378,12 +449,72 @@ def merchant_sweep(request: Request, all: int = 0,
     with db.connect() as conn:
         entries = db.merchant_summary(conn, unknown_only=not all)
         stats = db.coverage(conn)
+        # Always the undecided set, whatever the screen is currently showing:
+        # `?all=1` lists merchants that already have a category, and asking a
+        # model about those would spend money to re-answer settled questions.
+        unknown_keys = [e["key"] for e in db.merchant_summary(conn, unknown_only=True)]
     return templates.TemplateResponse(request, "merchants.html", {
         "entries": entries, "stats": stats, "show_all": bool(all),
         "categories": categorize.CATEGORIES,
         "unknown_value_minor": sum(e["value_minor"] or 0 for e in entries if e["unknown"]),
+        "tier3_ready": tier3.configured(),
+        "tier3_model": tier3.model_name(),
+        # The literal request body, so §9.4's disclosure is something the user
+        # can read rather than a promise they have to take on trust.
+        "tier3_payload": tier3.prompt_payload(unknown_keys),
+        "tier3_count": len(unknown_keys),
         "error": error, "notice": notice,
     })
+
+
+@app.post("/merchants/tier3")
+def run_tier3(all: int = Form(0)):
+    """Ask the model about the merchants nothing else knows (DESIGN.md §3, tier 3).
+
+    Explicitly triggered rather than automatic on upload, and that is §9.4
+    rather than caution for its own sake: this is the only outbound request the
+    app makes, so it happens when the user presses the button and not as a side
+    effect of filing a statement.
+
+    Results are written as guesses, never as decisions. What comes back is
+    reported in full — categorized, abstained, and any batch the gate threw
+    away — because a tier that quietly did nothing looks exactly like a tier
+    that had nothing to do.
+    """
+    back = f"/merchants{'?all=1' if all else ''}"
+
+    with db.connect() as conn:
+        keys = [e["key"] for e in db.merchant_summary(conn, unknown_only=True)]
+    if not keys:
+        return redirect(back, notice="Nothing to ask about — every merchant is categorized")
+    if not tier3.configured():
+        return redirect(back, error="No Gemini API key. Set GEMINI_API_KEY in the "
+                                    "environment or in a .env file at the project root.")
+
+    result = tier3.classify(keys)
+    assignments = result["assignments"]
+
+    with db.connect() as conn:
+        stored = db.remember_llm(conn, assignments)
+        moved = db.recategorize_all(conn)
+        conn.commit()
+
+    parts = [f"{stored} merchant(s) categorized by {tier3.model_name()}",
+             f"{moved} transaction(s) moved"]
+    if result["abstained"]:
+        parts.append(f"{len(result['abstained'])} left unknown by the model")
+    notice = ", ".join(parts)
+
+    # A discarded batch is the failure this whole tier is designed around, so it
+    # is reported as an error next to the notice rather than folded into it —
+    # those merchants are still uncategorized and the user needs to know that
+    # rather than assume the run covered everything.
+    error = None
+    if result["problems"]:
+        error = (f"{result['batches'] - result['batches_ok']} of {result['batches']} "
+                 f"batch(es) discarded, nothing stored from them: "
+                 + "; ".join(result["problems"][:3]))
+    return redirect(back, notice=notice, error=error)
 
 
 @app.post("/merchants")

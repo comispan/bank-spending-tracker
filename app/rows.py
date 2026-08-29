@@ -80,6 +80,31 @@ REF_VALUE = r"([A-Z0-9][A-Z0-9/-]{5,})"
 REF_LINE = re.compile(rf"(?i)^\s*{REF_LABEL}{REF_VALUE}\s*$")
 REF_INLINE = re.compile(rf"(?i)\b{REF_LABEL}{REF_VALUE}\b")
 
+# A charge in another currency is printed across three lines, not one (§4):
+#
+#                          Pinduoduo
+#     02 Jul   04 Jul                   102.67 HKD    16.99
+#                           1 HKD = 0.1655 SGD
+#
+# The dated line carries both figures, so the amount comes off the end as
+# usual and what is left over is the *foreign* amount rather than a merchant.
+# Left alone it becomes the whole description, which is how the Trust HKD row
+# reconciled to the cent while losing the merchant name entirely — a row no
+# categorizer can ever resolve, because there is nothing in it to resolve.
+FOREIGN_DESC = re.compile(
+    r"""(?ix) ^\s*
+    (?:(?P<cur_pre>[A-Z]{3})\s*)?
+    (?P<num>\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})
+    (?:\s*(?P<cur_post>[A-Z]{3}))?
+    \s*$"""
+)
+# `1 HKD = 0.1655 SGD`. The rate the *statement* printed, which §4 requires
+# over today's rate: it is the rate the money actually changed at.
+FX_RATE_LINE = re.compile(
+    r"""(?ix) \b1\s+(?P<from>[A-Z]{3})\s*=\s*
+    (?P<rate>\d+(?:\.\d+)?)\s*(?P<to>[A-Z]{3})\b"""
+)
+
 
 class Row:
     __slots__ = ("day", "month", "year", "posted", "description", "amount",
@@ -506,6 +531,67 @@ def _description_below(lines: list[str], i: int, lookahead: int = 2) -> str:
     return ""
 
 
+def _description_above(lines: list[str], i: int, lookback: int = 2) -> str:
+    """Merchant text on the line(s) over a row, for the foreign-currency shape.
+
+    The mirror of `_description_below`, and bounded the same way: it stops at a
+    dated line or one carrying an amount, so a merchant name can only ever be
+    claimed from the gap above its own row and never lifted off the previous
+    transaction.
+    """
+    examined = 0
+    for j in range(i - 1, -1, -1):
+        if examined >= lookback:
+            break
+        candidate = lines[j].strip()
+        if not candidate:
+            continue
+        if DATE_TOKEN.match(lines[j]) or AMOUNT_TAIL.search(lines[j]):
+            break
+        if re.search(r"[A-Za-z]{2,}", candidate):
+            return re.sub(r"\s{2,}", " ", candidate)
+        examined += 1
+    return ""
+
+
+def _foreign_amount(description: str) -> tuple[Decimal, str] | None:
+    """A leftover description that is a figure and a currency, not a merchant.
+
+    Requires the currency: a bare number left over is a column the parser has
+    not understood, and guessing a currency for it would invent data. `102.67
+    HKD` and `HKD 102.67` both occur in the wild; `SGD` is excluded because a
+    row billed in the statement's own currency has no conversion to record.
+    """
+    m = FOREIGN_DESC.match(description)
+    if not m:
+        return None
+    currency = (m.group("cur_pre") or m.group("cur_post") or "").upper()
+    if not currency or currency == "SGD":
+        return None
+    return Decimal(m.group("num").replace(",", "")), currency
+
+
+def _fx_rate_below(lines: list[str], i: int, currency: str, lookahead: int = 2) -> str | None:
+    """The conversion rate the statement printed under the row.
+
+    Only accepted when it names the same currency the row was charged in, so a
+    rate table further down the page cannot be read as this row's rate.
+    """
+    examined = 0
+    for j in range(i + 1, len(lines)):
+        if examined >= lookahead:
+            break
+        if not lines[j].strip():
+            continue
+        if DATE_TOKEN.match(lines[j]):
+            break
+        m = FX_RATE_LINE.search(lines[j])
+        if m and m.group("from").upper() == currency:
+            return m.group("rate")
+        examined += 1
+    return None
+
+
 def _reference_inline(text: str) -> str | None:
     """A reference the issuer wrote into the description itself."""
     m = REF_INLINE.search(text)
@@ -614,6 +700,21 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
                 pd, pm, py = dates[1]
                 py = py or resolve_year(pd, pm, period, fallback_year, statement_date)
                 posted = _iso((pd, pm, py))
+            # A charge in another currency leaves its foreign figure where the
+            # merchant should be, with the real name on the line above and the
+            # rate on the line below. Claim all three or none: a description
+            # replaced by a name that was never found would be worse than the
+            # figure it replaced, because at least the figure is honest about
+            # not being a merchant.
+            foreign_amount, foreign_currency, fx_rate = None, None, None
+            foreign = _foreign_amount(description)
+            if foreign:
+                above = _description_above(lines, i)
+                if above:
+                    foreign_amount, foreign_currency = str(foreign[0]), foreign[1]
+                    fx_rate = _fx_rate_below(lines, i, foreign_currency)
+                    description = above
+
             # Inline first: if the issuer put the reference in the description
             # it belongs to this row for certain, with no lookahead to get wrong.
             reference = _reference_inline(description) or _reference_below(lines, i)
@@ -621,6 +722,8 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
                 "date": iso, "posted_date": posted, "description": description,
                 "amount": str(amount), "direction": direction,
                 "reference": reference,
+                "foreign": {"amount": foreign_amount, "currency": foreign_currency},
+                "fx_rate": fx_rate,
             })
             out["_ambiguous_rows"] += int(ambiguous)
             continue

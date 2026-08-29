@@ -30,6 +30,46 @@
 </section>
 {% endif %}
 
+{% if tier3_count %}
+<details class="tier3">
+  <summary>
+    Ask a model about the {{ tier3_count }} merchant(s) nothing knows
+    <span class="hint">— tier 3, the only thing in this app that leaves your machine</span>
+  </summary>
+  <p class="hint">
+    Deciding these yourself is free, exact, and usually faster than reading a
+    model's answers and checking them. Tier 3 earns its place on the handful of
+    genuinely unfamiliar merchants that arrive with each new statement — not on
+    a backlog you could clear from this screen in a few minutes.
+  </p>
+  <p class="hint">
+    Answers are stored as <span class="src llm">llm</span> guesses, never as your
+    decisions. They are one click from being corrected, and correcting one turns
+    it into a real <span class="src memory">memory</span> entry. A merchant the
+    model declines to name is left uncategorized rather than guessed at.
+  </p>
+  <p>
+    <strong>Exactly this is sent</strong> to
+    <code>{{ tier3_model }}</code> — merchant names only, no amounts, no dates,
+    no balances, no card numbers, no statement text:
+  </p>
+  <pre class="payload">{{ tier3_payload }}</pre>
+  {% if tier3_ready %}
+    <form method="post" action="/merchants/tier3">
+      <input type="hidden" name="all" value="{{ 1 if show_all else 0 }}">
+      <button type="submit">Send these {{ tier3_count }} names and categorize</button>
+    </form>
+  {% else %}
+    <p class="empty">
+      No API key configured, so nothing can be sent. Set
+      <code>GEMINI_API_KEY</code> in the environment, or put
+      <code>GEMINI_API_KEY=...</code> in a <code>.env</code> file at the project
+      root, and restart the app.
+    </p>
+  {% endif %}
+</details>
+{% endif %}
+
 {% if not entries %}
   <p class="empty">
     {% if show_all %}Nothing parsed yet. <a href="/">Upload a statement.</a>
