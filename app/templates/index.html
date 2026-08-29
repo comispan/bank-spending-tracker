@@ -22,7 +22,18 @@
 <table>
   <thead>
     <tr>
-      <th>Statement</th><th>Period</th><th class="num">Pages</th>
+      {# Plain links, not a JS table sort: the order has to survive a reload
+         and a bookmark, and the row set is small enough that SQLite is the
+         cheaper place to do it. #}
+      <th>
+        <a href="{{ h.statement.href }}" class="sortlink{{ ' on' if h.statement.active }}"
+           title="Sort by issuer and card">Statement <span class="arrow">{{ h.statement.arrow }}</span></a>
+      </th>
+      <th>
+        <a href="{{ h.period.href }}" class="sortlink{{ ' on' if h.period.active }}"
+           title="Sort by when the statement starts — where an issuer prints no start date, by the earliest row on it">Period <span class="arrow">{{ h.period.arrow }}</span></a>
+      </th>
+      <th class="num">Pages</th>
       <th class="num">Rows</th><th>Verdict</th><th></th>
     </tr>
   </thead>
@@ -52,6 +63,15 @@
   {% endfor %}
   </tbody>
 </table>
+
+{% if sort == 'period' %}
+<p class="hint">
+  Sorted by where each statement <em>starts</em>. Most issuers print only a
+  closing date, and those rows are placed by their earliest parsed
+  transaction — a floor rather than the true start of the cycle, which is why
+  the Period column still shows them as <span class="date">to a date</span>.
+</p>
+{% endif %}
 
 <p class="hint">
   <strong>unverified</strong> is not a pass. It means the statement printed no

@@ -1285,6 +1285,69 @@ def test_tier3_retries() -> None:
           f"{out!r} slept={slept}")
 
 
+def test_statement_sort() -> None:
+    """Ordering the statement list (`db.STATEMENT_ORDERS`, `main.sort_headers`).
+
+    Two things are being protected. One is that a sort key from a URL never
+    reaches SQL as text — an ORDER BY cannot take a bound parameter, so the
+    whitelist is the only thing standing between a query string and the query.
+    The other is that "sort by period" means the *start* of the period, which
+    most issuers never print: getting the fallback wrong would silently clump
+    six of eleven statements at one end and look like a sort that half works.
+    """
+    print("\nstatement sort")
+    import db
+    import main
+
+    # Every offered ordering is a fixed string with one substitution point, and
+    # nothing else. If a key ever grows an f-string this check is the tripwire.
+    for key, clause in db.STATEMENT_ORDERS.items():
+        check(f"the {key} ordering is a literal", clause.count("{d}") >= 1 and
+              "{" not in clause.replace("{d}", ""), repr(clause))
+
+    # An unknown key is the default, not an error and not an injection point.
+    check("an unknown sort key falls back to the default",
+          db.STATEMENT_ORDERS.get("'; DROP TABLE txn --", db.STATEMENT_ORDERS["newest"])
+          == db.STATEMENT_ORDERS["newest"])
+
+    # Ordering by period start where the issuer prints one, and by the earliest
+    # parsed row where it does not. The DBS shape — statement date only — is
+    # the one that has to work, because it is six of the eleven statements.
+    check("period sorts on the start, with a floor for issuers that print none",
+          "period_start_floor" in db.STATEMENT_ORDERS["period"]
+          and "period_start_floor" not in db.STATEMENT_ORDERS["newest"],
+          repr(db.STATEMENT_ORDERS["period"]))
+
+    # `newest` is by period END and `period` is by period START. They are not
+    # the same ordering even where a corpus makes them look alike, which is why
+    # the default shows no arrow rather than lighting up the Period header.
+    check("the default order is not the period order",
+          db.STATEMENT_ORDERS["newest"] != db.STATEMENT_ORDERS["period"])
+
+    # Clicking the active column flips it; clicking another opens it at its own
+    # natural direction. A name reads A-Z, a date reads newest first, and
+    # carrying the direction across would open one of them backwards.
+    h = main.sort_headers("period", descending=True)
+    check("the active column offers the flip", "direction=asc" in h["period"]["href"],
+          h["period"]["href"])
+    check("the active column shows which way it runs", h["period"]["arrow"] == "▾")
+    check("an inactive name column opens A-Z", "direction=asc" in h["statement"]["href"],
+          h["statement"]["href"])
+    check("an inactive column shows no arrow", h["statement"]["arrow"] == "")
+
+    h = main.sort_headers("statement", descending=False)
+    check("the active name column offers the flip",
+          "direction=desc" in h["statement"]["href"], h["statement"]["href"])
+    check("an inactive date column opens newest first",
+          "direction=desc" in h["period"]["href"], h["period"]["href"])
+
+    # Every ordering the route will accept has a first-click direction, or the
+    # header for it raises a KeyError the moment somebody adds a fourth sort.
+    check("every ordering has a first-click direction",
+          set(main.SORT_FIRST_CLICK_DESC) == set(db.STATEMENT_ORDERS),
+          repr(set(main.SORT_FIRST_CLICK_DESC) ^ set(db.STATEMENT_ORDERS)))
+
+
 def test_cli_runs() -> None:
     """Actually invoke the CLI.
 
@@ -1401,6 +1464,7 @@ if __name__ == "__main__":
     test_tier3_gate()
     test_tier3_client()
     test_tier3_retries()
+    test_statement_sort()
     test_cli_runs()
     test_reconciliation()
     test_sanity_checks()
