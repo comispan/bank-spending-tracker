@@ -96,13 +96,55 @@ templates.env.filters["period"] = period
 
 # ------------------------------------------------------------------- views
 
+# Which way a column runs on its first click. A name reads A-Z and a date reads
+# newest first, so inheriting the direction from whichever column was clicked
+# last would make one of the two open backwards.
+SORT_FIRST_CLICK_DESC = {"newest": True, "statement": False, "period": True}
+
+
+def sort_headers(sort: str, descending: bool) -> dict[str, dict[str, object]]:
+    """Link target and arrow for each sortable column on the statement list.
+
+    Clicking the active column flips it; clicking any other starts that column
+    at its own natural direction rather than carrying over the current one.
+
+    `newest` is the default order and has no header of its own — it sorts by
+    period *end*, where the Period column sorts by start, and the two are not
+    the same ordering even though this corpus makes them look close. Rather
+    than point the Period header at an ordering it does not describe, the
+    default simply shows no arrow until a column is picked.
+    """
+    out: dict[str, dict[str, object]] = {}
+    for key, first_click_desc in SORT_FIRST_CLICK_DESC.items():
+        active = key == sort
+        nxt = not descending if active else first_click_desc
+        out[key] = {
+            "href": f"/?sort={key}&direction={'desc' if nxt else 'asc'}",
+            "active": active,
+            "arrow": ("▾" if descending else "▴") if active else "",
+        }
+    return out
+
+
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request, error: str | None = None, notice: str | None = None):
+def index(request: Request, error: str | None = None, notice: str | None = None,
+          sort: str = "newest", direction: str = ""):
+    """The upload form and the statement list (§8, Phase 1 step 4).
+
+    `sort` and `direction` come from a URL, so both are checked against a fixed
+    set here and an unknown value falls back to the default — a stale bookmark
+    should render the list, not a 422.
+    """
+    if sort not in db.STATEMENT_ORDERS:
+        sort = "newest"
+    descending = (direction != "asc") if direction else SORT_FIRST_CLICK_DESC[sort]
     with db.connect() as conn:
-        statements = db.list_statements(conn)
+        statements = db.list_statements(conn, sort, descending)
     return templates.TemplateResponse(
         request, "index.html",
-        {"statements": statements, "error": error, "notice": notice},
+        {"statements": statements, "error": error, "notice": notice,
+         "sort": sort, "descending": descending,
+         "h": sort_headers(sort, descending)},
     )
 
 

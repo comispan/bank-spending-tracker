@@ -576,14 +576,46 @@ def delete_statement(conn: sqlite3.Connection, statement_id: int) -> str | None:
 
 # ------------------------------------------------------------------- reads
 
-def list_statements(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+# The orderings the statement list offers, as a fixed map. The key arrives
+# from a query string, so it is looked up here and never interpolated: an
+# ORDER BY is the one clause that cannot take a bound parameter, which makes it
+# the one place a sort control invites string-building into SQL.
+#
+# `period` sorts by where a statement *starts*, and most issuers never print
+# that — six of the ten here give a closing date and nothing else. The fallback
+# is the earliest row parsed off the statement, which is the same floor the
+# `period` column already displays and labels "(from rows)". A floor is enough
+# to order by; it is not the cycle start and is not claimed to be.
+#
+# This is deliberately not `months.statement_windows()`, which infers a true
+# start by tiling consecutive cycles. That inference is right for a coverage
+# figure someone will trust, and too much machinery for deciding which row
+# draws first.
+STATEMENT_ORDERS = {
+    "newest": "COALESCE(s.period_end, s.statement_date, '') {d}, s.uploaded_at DESC",
+    "statement": "a.issuer {d}, a.last4 {d}, period_start_floor ASC",
+    "period": "period_start_floor {d}, a.issuer ASC",
+}
+
+
+def list_statements(conn: sqlite3.Connection, sort: str = "newest",
+                    descending: bool = True) -> list[sqlite3.Row]:
+    """The statement list, ordered by one of `STATEMENT_ORDERS`.
+
+    An unknown `sort` falls back to the default rather than raising: the value
+    comes from a URL, and a stale bookmark should show the list.
+    """
+    order = STATEMENT_ORDERS.get(sort, STATEMENT_ORDERS["newest"])
     return conn.execute(
-        """SELECT s.*, a.issuer, a.last4,
+        f"""SELECT s.*, a.issuer, a.last4,
                   (SELECT COUNT(*) FROM txn WHERE statement_id = s.id) AS txn_count,
                   (SELECT MIN(txn_date) FROM txn WHERE statement_id = s.id) AS first_txn,
-                  (SELECT MAX(txn_date) FROM txn WHERE statement_id = s.id) AS last_txn
+                  (SELECT MAX(txn_date) FROM txn WHERE statement_id = s.id) AS last_txn,
+                  COALESCE(s.period_start,
+                           (SELECT MIN(txn_date) FROM txn WHERE statement_id = s.id),
+                           '') AS period_start_floor
            FROM statement s JOIN account a ON a.id = s.account_id
-           ORDER BY COALESCE(s.period_end, s.statement_date, '') DESC, s.uploaded_at DESC"""
+           ORDER BY {order.format(d='DESC' if descending else 'ASC')}"""
     ).fetchall()
 
 
