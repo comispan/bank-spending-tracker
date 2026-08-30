@@ -1,10 +1,9 @@
 """Merchant normalization: one statement description -> one stable merchant key.
 
-Why this exists: tier 2 of the categorizer (DESIGN.md §3) is a lookup from a
-merchant key to the category the user chose last time, and it is what makes the
-app feel like it learns. It covers nothing at all unless
-`GRAB *TRIP 4821 SINGAPORE SG` and `GRAB *TRIP 9903 SINGAPORE SG` arrive at the
-same key.
+Why this exists: tier 2 of the categorizer (DESIGN.md Section 3) is a lookup
+from a merchant key to the category the user chose last time, and it is what
+makes the app feel like it learns. It covers nothing at all unless `GRAB *TRIP
+4821 SINGAPORE SG` and `GRAB *TRIP 9903 SINGAPORE SG` arrive at the same key.
 
 The job is stability, not tidiness. A key only has to be
 
@@ -18,11 +17,11 @@ asked about Grab all over again.
 
 The shape of the rule: **the merchant is at the front, and the junk starts
 somewhere.** Every issuer in the corpus prints merchant first, then location,
-then its own reference numbers — 59 rows of one statement are
-`NAME NAME NAME SINGAPORE 065`, another 59 are `BUS/MRT 870632419 SINGAPORE`.
-Cutting at the first token that cannot be part of a name generalizes better
-than enumerating suffixes, because the suffixes are per-issuer and the names
-are not. Same reasoning as §2.2 parsing rows by shape rather than by bank.
+then its own reference numbers — 59 rows of one statement are `NAME NAME NAME
+SINGAPORE 065`, another 59 are `BUS/MRT 870632419 SINGAPORE`. Cutting at the
+first token that cannot be part of a name generalizes better than enumerating
+suffixes, because the suffixes are per-issuer and the names are not. Same
+reasoning as Section 2.2 parsing rows by shape rather than by bank.
 
 A star is the one place that shape reverses — `GATEWAY*THE REAL SHOP` puts the
 merchant on the right — so `_resolve_star` reads both sides before choosing.
@@ -73,8 +72,8 @@ TLDS = {"com", "net", "org", "sg", "co", "io", "app", "tv", "ai",
 DOMAIN = re.compile(r"^(?:www\.)?(?P<name>[a-z0-9][a-z0-9&'-]*)\.(?P<tld>[a-z]{2,})")
 
 # A refund prints as the merchant plus a marker. It has to reduce to the same
-# key as the purchase, or §3's "net refunds against the original merchant" has
-# nothing to net against.
+# key as the purchase, or Section 3's "net refunds against the original
+# merchant" has nothing to net against.
 KIND_SUFFIX = re.compile(
     r"(?i)\s*[-–—]?\s*\b(?:refund|refunded|reversal|reversed|chargeback|credit\s+voucher)\b\s*$"
 )
@@ -116,7 +115,8 @@ def normalize(description: str) -> str:
     key = _alias(key)
     # Never return "" for a description that had content. An empty key is one
     # bucket that every unreadable row falls into and is then categorized
-    # together — exactly the silent wrongness the gate in §2.3 exists to stop.
+    # together — exactly the silent wrongness the gate in Section 2.3 exists to
+    # stop.
     return key or re.sub(r"\s+", " ", text).strip(EDGE_PUNCT) or description.strip().lower()
 
 

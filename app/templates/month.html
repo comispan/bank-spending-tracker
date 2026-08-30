@@ -42,9 +42,10 @@
   {%- endif %}
 </p>
 
-{# §4's "vs 3-month average", held to the same standard as the delta above:
-   an average over part-billed months is a low number with nothing on its face
-   to say so, and every month compared against it then reads as an overspend. #}
+{# Section 4's "vs 3-month average", held to the same standard as the delta
+   above: an average over part-billed months is a low number with nothing on
+   its face to say so, and every month compared against it then reads as an
+   overspend. #}
 <p class="hint">
   {% if m.trailing_avg_minor is not none %}
     Against the {{ m.trailing_months | length }}-month average of
@@ -160,7 +161,7 @@
 <p class="hint">
   Card payments, transfers, fees and income are held out of the total above —
   a payment to a card is the same money moving, and counting it would
-  double-count against the bank statement that also shows it (§3).
+  double-count against the bank statement that also shows it.
 </p>
 <table>
   <thead><tr><th>Flow</th><th class="num">Amount</th><th class="num">Rows</th></tr></thead>

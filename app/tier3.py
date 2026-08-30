@@ -1,18 +1,19 @@
 """Tier 3 of the categorizer: a model, for the merchants nothing else knows.
 
-DESIGN.md §3 leaves this as the last tier and §9.4 as the only question in the
-app about anything leaving the machine. Both are settled here, and narrowly:
-what goes out is a **list of normalized merchant names** — `grab`, `fairprice`,
-`netflix` — and nothing else. No amounts, no dates, no balances, no card
-numbers, no statement text, no account identifiers. The payload is built in
-`prompt_payload()` below and the UI shows it verbatim before anything is sent.
+DESIGN.md Section 3 leaves this as the last tier and Section 9.4 as the only
+question in the app about anything leaving the machine. Both are settled here,
+and narrowly: what goes out is a **list of normalized merchant names** —
+`grab`, `fairprice`, `netflix` — and nothing else. No amounts, no dates, no
+balances, no card numbers, no statement text, no account identifiers. The
+payload is built in `prompt_payload()` below and the UI shows it verbatim
+before anything is sent.
 
 **This module is what the eval grades.** `spike/eval_categories.py` imports the
 prompt, the schema and the gate from right here rather than keeping its own
 copy, because a harness that scores a different prompt than the one that ships
-is measuring a component nobody is going to run. §2.3's rule — a component
-nobody can grade does not ship — only means something if the graded thing and
-the shipped thing are the same code.
+is measuring a component nobody is going to run. Section 2.3's rule — a
+component nobody can grade does not ship — only means something if the graded
+thing and the shipped thing are the same code.
 
 Two properties carried over from the Phase 0 findings, and neither is optional:
 
@@ -49,11 +50,11 @@ API_REVISION = "2026-05-20"
 DEFAULT_MODEL = "gemini-3.7-flash"
 TIMEOUT_SECONDS = 120
 
-# Merchants per request. One call for the whole batch is what §3 describes and
-# 34 unknown merchants — the real monthly figure — fits in one comfortably. The
-# chunking matters at the other end of the range: with a large first-import
-# backlog, a batch that fails the gate takes only its own chunk down with it
-# instead of every merchant in the app.
+# Merchants per request. One call for the whole batch is what Section 3
+# describes and 34 unknown merchants — the real monthly figure — fits in one
+# comfortably. The chunking matters at the other end of the range: with a large
+# first-import backlog, a batch that fails the gate takes only its own chunk
+# down with it instead of every merchant in the app.
 BATCH_SIZE = 60
 
 # Measured 2026-08-28 on a free-tier key: the Flash models answer a 43-merchant
@@ -151,9 +152,9 @@ def model_name() -> str:
 def prompt_payload(keys: list[str]) -> str:
     """Exactly what would be sent, for the screen that asks permission to send it.
 
-    §9.4 is a disclosure question, and a disclosure the user cannot check is not
-    one. This returns the literal user-turn content so the UI can print it
-    rather than describe it.
+    Section 9.4 is a disclosure question, and a disclosure the user cannot
+    check is not one. This returns the literal user-turn content so the UI can
+    print it rather than describe it.
     """
     return "\n".join(keys)
 
@@ -297,8 +298,8 @@ def ask_gemini(keys: list[str], model: str | None = None,
 def gate(raw: str, asked: list[str]) -> tuple[bool, list[str], dict[str, str]]:
     """The contract enforced before anything reaches the database.
 
-    Deliberately all-or-nothing on the batch, the same way §2.3 refuses to
-    half-trust an extraction. A response that dropped nine merchants is not
+    Deliberately all-or-nothing on the batch, the same way Section 2.3 refuses
+    to half-trust an extraction. A response that dropped nine merchants is not
     "mostly fine" — it is a response you cannot reason about.
     """
     problems: list[str] = []

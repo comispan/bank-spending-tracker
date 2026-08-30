@@ -21,4 +21,4 @@ It also answered a question we didn't ask — extraction needs no model at all. 
 layer already carries the table, so it's parsed in code, offline, in milliseconds.
 See [spike/README.md](spike/README.md).
 
-Phase 1 next. See DESIGN.md §8.
+Phase 1 next. See DESIGN.md Section 8.

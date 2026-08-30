@@ -211,7 +211,7 @@ td.actions form { display: inline; }
 
 /* ------------------------------------------------- month report (Phase 3) */
 
-/* A bar beside the number rather than instead of it. DESIGN.md §4: the
+/* A bar beside the number rather than instead of it. DESIGN.md Section 4: the
    breakdown needs the numeric table, and a donut of thirteen categories is
    unreadable. Uncategorized is drawn in the warning colour because it is a
    hole in the report, not a category of spending. */

@@ -9,7 +9,7 @@
   The small grey line under a description is the merchant key the categorizer
   learns against; it is shown only where it differs from what the statement
   printed. The page number on the right opens the statement PDF this row was
-  read from — every figure in the report traces back to a page (§4).
+  read from — every figure in the report traces back to a page.
 </p>
 
 {# A filtered list that looks like the whole list is how a slice gets read as
@@ -86,7 +86,7 @@
       </td>
       <td class="num {{ t.direction }}">{{ t.amount_sgd_minor | money }}
         {#- A foreign charge keeps what the statement printed alongside what it
-            billed, converted at the statement's own rate (§4). -#}
+            billed, converted at the statement's own rate (Section 4). -#}
         {% if t.currency and t.currency != 'SGD' %}
           <span class="merchant">{{ t.amount_minor | money }} {{ t.currency }}
             {%- if t.fx_rate %} @ {{ t.fx_rate }}{% endif %}</span>
