@@ -21,7 +21,7 @@ What this gives up is the ability to read a page with no text layer. A scanned s
 
 ## Grading a tier-3 model
 
-`eval_categories.py` answers the question DESIGN.md §9.4 leaves open — cloud
+`eval_categories.py` answers the question DESIGN.md Section 9.4 leaves open — cloud
 model or local one — with a number instead of a preference. It grades a
 candidate against the merchants **you** categorized by hand, which is the only
 ground truth that exists for your own spending.

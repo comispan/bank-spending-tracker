@@ -1,4 +1,4 @@
-"""Tiers 1 and 2 of the categorizer, and the flow_type axis (DESIGN.md §3).
+"""Tiers 1 and 2 of the categorizer, and the flow_type axis (DESIGN.md Section 3).
 
 Pure functions over plain data — no database, no network — so the whole
 resolution order is testable in the spike harness the same way `rows.py` is.
@@ -15,9 +15,10 @@ Two axes, and they are not the same question:
   category   what the money was spent on           Groceries, Transport, …
   flow_type  whether it was spending at all        spend, refund, transfer, fee, income
 
-§3 keeps them separate because a card payment is not a category of spending —
-it is the same money moving, and counting it as spend double-counts against the
-bank statement that also shows it. Reports sum `spend` and net out `refund`.
+Section 3 keeps them separate because a card payment is not a category of
+spending — it is the same money moving, and counting it as spend double-counts
+against the bank statement that also shows it. Reports sum `spend` and net out
+`refund`.
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ import re
 
 from merchants import merchant_root
 
-# Fixed in v1, per §3: a large taxonomy makes both the user and a model worse
-# at choosing. User-defined categories are v1.1.
+# Fixed in v1, per Section 3: a large taxonomy makes both the user and a model
+# worse at choosing. User-defined categories are v1.1.
 CATEGORIES = [
     "Groceries", "Dining", "Transport", "Shopping", "Bills & Utilities",
     "Health", "Entertainment", "Travel", "Education", "Fees & Interest",
@@ -37,10 +38,10 @@ CATEGORIES = [
 FLOW_TYPES = ["spend", "refund", "transfer", "fee", "income"]
 
 # Where a flow_type already answers the category question. A refund is
-# deliberately absent: §3 nets refunds against the *original merchant*, and
-# normalization already keys `UNIQLO … - REFUND` to the same merchant as the
-# purchase, so the refund inherits that merchant's category instead of being
-# filed under a category of its own.
+# deliberately absent: Section 3 nets refunds against the *original merchant*,
+# and normalization already keys `UNIQLO … - REFUND` to the same merchant as
+# the purchase, so the refund inherits that merchant's category instead of
+# being filed under a category of its own.
 CATEGORY_FOR_FLOW = {
     "transfer": "Cash & Transfers",
     "fee": "Fees & Interest",
@@ -166,15 +167,15 @@ def resolve(description: str, merchant: str, direction: str,
     Cheapest tier first, and the first hit wins:
 
       1. a user rule            always wins, that is what makes it tier 1
-      2. learned memory         the merchant key, then its root (§3)
+      2. learned memory         the merchant key, then its root (Section 3)
       3. the flow_type itself   a card payment needs no merchant lookup
       -  nothing                category None, an honest gap for tier 3 or the user
 
     `rules` must arrive already ordered by priority. A rule that names no
     flow_type leaves the derived one alone, and memory never carries one at
     all: "this merchant is Groceries" says nothing about whether a particular
-    row was a purchase or a refund, and §5 keeps flow_type off merchant_memory
-    for exactly that reason.
+    row was a purchase or a refund, and Section 5 keeps flow_type off
+    merchant_memory for exactly that reason.
     """
     flow = default_flow(description, direction)
 
@@ -182,9 +183,9 @@ def resolve(description: str, merchant: str, direction: str,
         if match_rule(rule, description, merchant):
             return rule["category"], rule["flow_type"] or flow, "rule"
 
-    # The precise key first, its root second. §3: `grab` and `grab trip` are one
-    # merchant, and the root is what reunites them without normalization having
-    # to guess that `trip` is a service word.
+    # The precise key first, its root second. Section 3: `grab` and `grab trip`
+    # are one merchant, and the root is what reunites them without
+    # normalization having to guess that `trip` is a service word.
     for key in (merchant, merchant_root(merchant or "")):
         hit = memory.get(key) if key else None
         if hit:

@@ -1,11 +1,12 @@
-{# The inline recategorize control (DESIGN.md §3), shared by the transactions
-   list and the statement detail page so the two cannot drift apart.
+{# The inline recategorize control (DESIGN.md Section 3), shared by the
+   transactions list and the statement detail page so the two cannot drift
+   apart.
 
    Plain form posts, not HTMX. The design named HTMX, but pulling it from a CDN
    would be an outbound request from a page rendering someone's complete
-   spending record — §7 — and vendoring a library to avoid one page reload is a
-   poor trade for two <select>s. `onchange` submits the form; the small button
-   is there for anyone who changes only the checkbox. #}
+   spending record — Section 7 — and vendoring a library to avoid one page
+   reload is a poor trade for two <select>s. `onchange` submits the form; the
+   small button is there for anyone who changes only the checkbox. #}
 
 {% macro category_cell(t, categories, flow_types, back) %}
 <form method="post" action="/transactions/{{ t.id }}/category" class="catform">

@@ -101,9 +101,9 @@ CREATE INDEX IF NOT EXISTS txn_by_statement ON txn(statement_id);
 CREATE INDEX IF NOT EXISTS txn_by_date ON txn(txn_date);
 CREATE INDEX IF NOT EXISTS txn_by_merchant ON txn(merchant_normalized);
 
--- Tier 1 (DESIGN.md §3): the user's own patterns, which always win. Kept
--- separate from merchant_memory because a rule is a standing instruction and
--- memory is an observation — a rule survives being contradicted by a later
+-- Tier 1 (DESIGN.md Section 3): the user's own patterns, which always win.
+-- Kept separate from merchant_memory because a rule is a standing instruction
+-- and memory is an observation — a rule survives being contradicted by a later
 -- click, and that is the whole point of it being tier 1.
 CREATE TABLE IF NOT EXISTS merchant_rule (
     id          INTEGER PRIMARY KEY,
@@ -122,18 +122,16 @@ CREATE TABLE IF NOT EXISTS merchant_rule (
 -- merchants.py. `source` separates a decision the user made from a seeded
 -- guess shipped with the app — they are not the same claim, and the UI says
 -- so. A user decision overwrites a seed permanently; a seed never overwrites a
--- user decision.
--- No flow_type column here, unlike merchant_rule, and §5 has it that way for a
--- reason: a category is a property of the merchant, but whether a particular
--- row was a purchase or a refund is a property of the row. Learning "Uniqlo is
--- Shopping" from one purchase must not then declare every future Uniqlo refund
--- to be spending.
--- `llm` is tier 3's own source, and it is a third kind of claim rather than a
--- variety of the other two: a seed is the app's guess about everyone, memory is
--- this user's decision, and llm is a model's guess about this user's merchant.
--- Keeping it distinct is what lets the UI show which categories nobody has
--- actually checked, and what stops a correction being written back as though
--- the user had made it.
+-- user decision. No flow_type column here, unlike merchant_rule, and Section 5
+-- has it that way for a reason: a category is a property of the merchant, but
+-- whether a particular row was a purchase or a refund is a property of the
+-- row. Learning "Uniqlo is Shopping" from one purchase must not then declare
+-- every future Uniqlo refund to be spending. `llm` is tier 3's own source, and
+-- it is a third kind of claim rather than a variety of the other two: a seed
+-- is the app's guess about everyone, memory is this user's decision, and llm
+-- is a model's guess about this user's merchant. Keeping it distinct is what
+-- lets the UI show which categories nobody has actually checked, and what
+-- stops a correction being written back as though the user had made it.
 CREATE TABLE IF NOT EXISTS merchant_memory (
     merchant_normalized TEXT PRIMARY KEY,
     category    TEXT NOT NULL,
@@ -277,9 +275,10 @@ def backfill_periods(conn: sqlite3.Connection) -> int:
 
     Only fills gaps — a period the parser already found is never overwritten,
     so this cannot quietly move a statement that was right. Runs off the stored
-    `page_text` rather than the PDF, which is exactly what §5 keeps it for: the
-    extraction is deterministic, so improving the parser can be replayed over
-    what is already uploaded instead of asking for the files again.
+    `page_text` rather than the PDF, which is exactly what Section 5 keeps it
+    for: the extraction is deterministic, so improving the parser can be
+    replayed over what is already uploaded instead of asking for the files
+    again.
     """
     updates = []
     for row in conn.execute(
@@ -300,8 +299,8 @@ def backfill_foreign_amounts(conn: sqlite3.Connection) -> int:
 
     A foreign charge used to store its own figure as the description — `102.67
     HKD` where the merchant should be — because the issuer prints the name a
-    line above and the rate a line below (§4). Those rows reconcile to the cent
-    and can never be categorized, which is the quietest kind of wrong.
+    line above and the rate a line below (Section 4). Those rows reconcile to
+    the cent and can never be categorized, which is the quietest kind of wrong.
 
     Replayed off `page_text` for the same reason as `backfill_periods`, and
     matched on `(date, amount)` within the statement rather than on row order,
@@ -408,7 +407,7 @@ def recategorize_all(conn: sqlite3.Connection) -> int:
     `category_source = 'user'` is the one thing this will not touch. A person
     who clicked a category on a specific row has said something more specific
     than any rule, and having that quietly reverted on the next boot would make
-    the app untrustworthy in exactly the way §2.3 is about.
+    the app untrustworthy in exactly the way Section 2.3 is about.
     """
     rules = merchant_rules(conn)
     memory = memory_map(conn)
@@ -444,9 +443,9 @@ def recategorize_all(conn: sqlite3.Connection) -> int:
 def remember(conn: sqlite3.Connection, merchant: str, category: str) -> None:
     """Write a user decision into tier 2, replacing whatever was there.
 
-    §3: every recategorization feeds the memory, which is the loop that makes
-    the app feel smart by month three. The source flips to `memory` here, so a
-    seeded guess that gets corrected stops being labelled a guess.
+    Section 3: every recategorization feeds the memory, which is the loop that
+    makes the app feel smart by month three. The source flips to `memory` here,
+    so a seeded guess that gets corrected stops being labelled a guess.
     """
     conn.execute(
         """INSERT INTO merchant_memory (merchant_normalized, category, source, updated_at)
@@ -496,13 +495,13 @@ def set_category(conn: sqlite3.Connection, txn_id: int, category: str | None,
     outranks a bulk apply — the user can still open that row and change it.
 
     **`apply_to_matching` also controls whether this is remembered at all**, and
-    that is a deliberate reading of §3's "write it back to tier 2 *and* offer to
-    apply it to past matches". Those cannot be two independent choices: memory
-    feeds `recategorize_all`, so anything written here reaches the past rows on
-    the next pass whatever the checkbox said. Rather than let the checkbox
-    quietly do nothing, it means what a person would expect it to mean —
-    remember this merchant and move every row like it, or touch this one row
-    only.
+    that is a deliberate reading of Section 3's "write it back to tier 2 *and*
+    offer to apply it to past matches". Those cannot be two independent
+    choices: memory feeds `recategorize_all`, so anything written here reaches
+    the past rows on the next pass whatever the checkbox said. Rather than let
+    the checkbox quietly do nothing, it means what a person would expect it to
+    mean — remember this merchant and move every row like it, or touch this one
+    row only.
     """
     row = conn.execute(
         """SELECT merchant_normalized, description_raw, direction
@@ -565,7 +564,7 @@ def forget_merchant(conn: sqlite3.Connection, merchant: str) -> None:
 
 
 def delete_statement(conn: sqlite3.Connection, statement_id: int) -> str | None:
-    """Hard delete, per DESIGN.md §7. Returns the stored file path to unlink."""
+    """Hard delete, per Section 7. Returns the stored file path to unlink."""
     row = conn.execute("SELECT storage_path FROM statement WHERE id = ?", (statement_id,)).fetchone()
     if not row:
         return None
@@ -598,14 +597,17 @@ STATEMENT_ORDERS = {
 }
 
 
-def list_statements(conn: sqlite3.Connection, sort: str = "newest",
-                    descending: bool = True) -> list[sqlite3.Row]:
+def list_statements(conn: sqlite3.Connection, sort: str = "statement",
+                    descending: bool = False) -> list[sqlite3.Row]:
     """The statement list, ordered by one of `STATEMENT_ORDERS`.
+
+    The default is issuer and card, A-Z — `descending=False` is what makes the
+    named column read forwards, so the two defaults have to move together.
 
     An unknown `sort` falls back to the default rather than raising: the value
     comes from a URL, and a stale bookmark should show the list.
     """
-    order = STATEMENT_ORDERS.get(sort, STATEMENT_ORDERS["newest"])
+    order = STATEMENT_ORDERS.get(sort, STATEMENT_ORDERS["statement"])
     return conn.execute(
         f"""SELECT s.*, a.issuer, a.last4,
                   (SELECT COUNT(*) FROM txn WHERE statement_id = s.id) AS txn_count,
@@ -649,9 +651,9 @@ def totals_for(conn: sqlite3.Connection, statement_id: int) -> dict[str, int]:
 def coverage(conn: sqlite3.Connection) -> dict[str, Any]:
     """Which tier answered, over every transaction stored.
 
-    §3 predicts roughly 10% from rules and 75% from memory once warm. Showing
-    the real split is how you find out whether that is happening — and the
-    `none` bucket is the honest size of the gap tier 3 (or the user) has to
+    Section 3 predicts roughly 10% from rules and 75% from memory once warm.
+    Showing the real split is how you find out whether that is happening — and
+    the `none` bucket is the honest size of the gap tier 3 (or the user) has to
     close, rather than a pile of rows quietly filed under Other.
     """
     by_source = {r["src"] or "none": r["n"] for r in conn.execute(
@@ -686,7 +688,7 @@ def coverage_by_account(conn: sqlite3.Connection) -> dict[str, list[tuple[str, s
 
 
 def month_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """One row per calendar month, bucketed by transaction date (§4).
+    """One row per calendar month, bucketed by transaction date (Section 4).
 
     Each month carries its own completeness, and a like-for-like figure: when a
     month is only billed to the 14th, the honest comparison is against the
@@ -772,10 +774,10 @@ def month_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         row["prior_comparable"] = base
         row["delta_minor"] = row["spend_comparable"] - base
 
-    # The three-month average §4 asks for. Which months are allowed into it is
-    # the part that decides whether the figure means anything, so that decision
-    # lives in `months.trailing_window` beside the rest of the coverage
-    # reasoning and is tested as a pure function.
+    # The three-month average Section 4 asks for. Which months are allowed into
+    # it is the part that decides whether the figure means anything, so that
+    # decision lives in `months.trailing_window` beside the rest of the
+    # coverage reasoning and is tested as a pure function.
     for i, row in enumerate(out):
         usable, short, note = months.trailing_window(row, out[:i])
         row["trailing_months"] = [m["month"] for m in usable]
@@ -788,7 +790,7 @@ def month_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def month_notable(conn: sqlite3.Connection, ym: str, trailing: list[str],
                   days: tuple[int, int] | None) -> dict[str, Any]:
-    """§4's "new and unusual": merchants never seen, categories running hot.
+    """Section 4's "new and unusual": merchants never seen, categories running hot.
 
     Two questions with different standards of proof, deliberately not merged.
 

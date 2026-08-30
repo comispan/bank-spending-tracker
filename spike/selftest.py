@@ -222,8 +222,8 @@ def test_row_parsing() -> None:
           repr(noise["transactions"]))
 
     # A foreign charge is three lines, not one: the merchant above, both
-    # figures on the dated line, the rate below (DESIGN.md §4). Parsed as one
-    # line the row reconciles to the cent while its description becomes
+    # figures on the dated line, the rate below (DESIGN.md Section 4). Parsed
+    # as one line the row reconciles to the cent while its description becomes
     # `102.67 HKD` — right money, no merchant, and nothing to categorize.
     fx = (
         "          25 Jun   26 Jun    Apple                        3.98\n"
@@ -435,7 +435,7 @@ def test_row_parsing() -> None:
 
 
 def test_month_coverage() -> None:
-    """How much of a calendar month the statements actually cover (§4 trap 1).
+    """How much of a calendar month the statements actually cover (Section 4 trap 1).
 
     The number this protects is the headline of the whole report. On the real
     corpus August reads as 1,319.55 against July's 4,756.64 — a 72% collapse —
@@ -546,11 +546,11 @@ def test_month_coverage() -> None:
     check("a partial month reports its comparable days",
           months.comparable_days(aug) == (1, 14), repr(months.comparable_days(aug)))
 
-    # §4's three-month average. The averaging is arithmetic; what decides
-    # whether the figure means anything is which months are let into it. An
-    # average hides a short month better than a single comparison does — three
-    # part-billed months make one low number with nothing on its face to say
-    # so, and every month measured against it then reads as an overspend.
+    # Section 4's three-month average. The averaging is arithmetic; what
+    # decides whether the figure means anything is which months are let into
+    # it. An average hides a short month better than a single comparison does —
+    # three part-billed months make one low number with nothing on its face to
+    # say so, and every month measured against it then reads as an overspend.
     def month_status(ym: str, window: tuple[str, str] | None) -> dict:
         return months.month_completeness(ym, {"A": [window] if window else []})
 
@@ -620,8 +620,8 @@ def test_cycle_dates() -> None:
     """When the statement date is a column header rather than a line label.
 
     Four of ten statements in the corpus reported no period at all, which makes
-    §4's "is this month complete for this card" unanswerable — and all four
-    print the answer, just not on a line the parser could read.
+    Section 4's "is this month complete for this card" unanswerable — and all
+    four print the answer, just not on a line the parser could read.
     """
     print("\ncycle dates")
     import rows
@@ -690,7 +690,7 @@ def test_cycle_dates() -> None:
 
 
 def test_merchant_normalization() -> None:
-    """The key tier 2 of the categorizer looks up (DESIGN.md §3).
+    """The key tier 2 of the categorizer looks up (DESIGN.md Section 3).
 
     Every string here is either synthetic or already in git — the real corpus is
     checked on the machine that holds it, never from a session.
@@ -705,16 +705,17 @@ def test_merchant_normalization() -> None:
     def key(s: str) -> str:
         return merchants.normalize(s)
 
-    # The case DESIGN.md §3 names outright. Without this, next month's receipt
-    # number is a new merchant and the user categorizes Grab all over again.
+    # The case DESIGN.md Section 3 names outright. Without this, next month's
+    # receipt number is a new merchant and the user categorizes Grab all over
+    # again.
     starred = {key("GRAB *TRIP 4821 SINGAPORE SG"), key("GRAB *TRIP 9903 SINGAPORE SG"),
                key("GRAB* TRIP 1174")}
     check("a receipt number does not invent a new merchant", starred == {"grab"}, repr(starred))
 
-    # The third spelling in §3 has no star to cut at, so it keeps a word the
-    # others dropped. It meets them at the root instead — which is the whole
-    # reason there is a root, rather than normalization guessing that `trip` is
-    # a service word and not part of somebody's name.
+    # The third spelling in Section 3 has no star to cut at, so it keeps a word
+    # the others dropped. It meets them at the root instead — which is the
+    # whole reason there is a root, rather than normalization guessing that
+    # `trip` is a service word and not part of somebody's name.
     check("a starless spelling meets the others at the root",
           merchants.merchant_root(key("Grab Trip SG")) == "grab", repr(key("Grab Trip SG")))
 
@@ -808,8 +809,8 @@ def test_merchant_normalization() -> None:
           key("AMZN Mktp SG*RT4G91 AMAZON.SG") == "amazon",
           repr(key("AMZN Mktp SG*RT4G91 AMAZON.SG")))
 
-    # §3 nets refunds against the original merchant, which needs the refund to
-    # land on the merchant's key rather than one of its own.
+    # Section 3 nets refunds against the original merchant, which needs the
+    # refund to land on the merchant's key rather than one of its own.
     check("a refund keys as the merchant it reverses",
           key("UNIQLO ION ORCHARD - REFUND") == key("UNIQLO ION ORCHARD SINGAPORE SG"),
           repr((key("UNIQLO ION ORCHARD - REFUND"), key("UNIQLO ION ORCHARD SINGAPORE SG"))))
@@ -821,7 +822,8 @@ def test_merchant_normalization() -> None:
           repr(key("ROYAL PLAZA SINGAPORE")))
 
     # An empty key is one bucket that every unreadable row falls into and is
-    # then categorized together — the silent wrongness §2.3 exists to prevent.
+    # then categorized together — the silent wrongness Section 2.3 exists to
+    # prevent.
     for odd in ["***", "065", "SG", "   ", "-"]:
         k = key(odd)
         check(f"never empty for {odd!r}", k != "" or odd.strip() == "", repr(k))
@@ -856,7 +858,7 @@ def test_merchant_normalization() -> None:
 
 
 def test_flow_type() -> None:
-    """Whether a row is spending at all (DESIGN.md §3).
+    """Whether a row is spending at all (DESIGN.md Section 3).
 
     The bias is toward `spend` throughout. A row wrongly left as spend is
     visible in the total and one click from being fixed; a row wrongly excluded
@@ -869,8 +871,9 @@ def test_flow_type() -> None:
     def flow(desc, direction="debit"):
         return categorize.default_flow(desc, direction)
 
-    # The rows §4 is about: a card payment appears on the card statement *and*
-    # on the bank statement that paid it. Counted as spend, it double-counts.
+    # The rows Section 4 is about: a card payment appears on the card statement
+    # *and* on the bank statement that paid it. Counted as spend, it
+    # double-counts.
     check("a card payment is a transfer", flow("PAYMENT - THANK YOU", "credit") == "transfer",
           flow("PAYMENT - THANK YOU", "credit"))
     check("UOB's spelling too", flow("CCRD-Credit Card Payment", "credit") == "transfer",
@@ -917,7 +920,7 @@ def test_flow_type() -> None:
 
 
 def test_resolution_order() -> None:
-    """Tiers 1 and 2, and what happens when neither knows (DESIGN.md §3)."""
+    """Tiers 1 and 2, and what happens when neither knows (DESIGN.md Section 3)."""
     print("\ncategory resolution")
     import categorize
     import merchants
@@ -989,7 +992,7 @@ def test_resolution_order() -> None:
           resolve("INTEREST CHARGE", "interest charge")[0] == "Fees & Interest",
           repr(resolve("INTEREST CHARGE", "interest charge")))
 
-    # ...but a refund does not, because §3 nets it against the original
+    # ...but a refund does not, because Section 3 nets it against the original
     # merchant, and normalization already keyed it to that merchant.
     refund = resolve("GRAB *TRIP - REFUND", "grab", "credit")
     check("a refund keeps the merchant's category", refund[:2] == ("Transport", "refund"),
@@ -1023,8 +1026,8 @@ def test_tier3_gate() -> None:
     something well-formed and empty rather than an error. Every check here is a
     way that can happen, and the gate has to be all-or-nothing about it: a
     response that dropped nine merchants is not "mostly fine", it is a response
-    you cannot reason about. Same argument as §2.3 refusing to half-trust an
-    extraction.
+    you cannot reason about. Same argument as Section 2.3 refusing to
+    half-trust an extraction.
     """
     print("\ntier 3 gate")
     # `ev` for the scoring helpers, `tier3` for the gate itself — the eval
@@ -1307,8 +1310,24 @@ def test_statement_sort() -> None:
 
     # An unknown key is the default, not an error and not an injection point.
     check("an unknown sort key falls back to the default",
-          db.STATEMENT_ORDERS.get("'; DROP TABLE txn --", db.STATEMENT_ORDERS["newest"])
-          == db.STATEMENT_ORDERS["newest"])
+          db.STATEMENT_ORDERS.get("'; DROP TABLE txn --", db.STATEMENT_ORDERS["statement"])
+          == db.STATEMENT_ORDERS["statement"])
+
+    # The list opens grouped by card, A-Z. The route default and the db default
+    # are two separate defaults for one behaviour, and `descending` is what
+    # makes the named column read forwards, so all three have to agree or the
+    # page opens Z-A while every link on it says otherwise.
+    import inspect
+    route = inspect.signature(main.index).parameters
+    db_default = inspect.signature(db.list_statements).parameters
+    check("the list defaults to the statement column",
+          route["sort"].default == "statement"
+          and db_default["sort"].default == "statement",
+          f'{route["sort"].default!r} / {db_default["sort"].default!r}')
+    check("the default column reads A-Z",
+          main.SORT_FIRST_CLICK_DESC["statement"] is False
+          and db_default["descending"].default is False,
+          f'{db_default["descending"].default!r}')
 
     # Ordering by period start where the issuer prints one, and by the earliest
     # parsed row where it does not. The DBS shape — statement date only — is
@@ -1320,9 +1339,13 @@ def test_statement_sort() -> None:
 
     # `newest` is by period END and `period` is by period START. They are not
     # the same ordering even where a corpus makes them look alike, which is why
-    # the default shows no arrow rather than lighting up the Period header.
-    check("the default order is not the period order",
+    # a bookmarked `newest` shows no arrow rather than lighting up the Period
+    # header.
+    check("the newest order is not the period order",
           db.STATEMENT_ORDERS["newest"] != db.STATEMENT_ORDERS["period"])
+    h = main.sort_headers("newest", descending=True)
+    check("a bookmarked newest lights up neither header",
+          not h["statement"]["active"] and not h["period"]["active"])
 
     # Clicking the active column flips it; clicking another opens it at its own
     # natural direction. A name reads A-Z, a date reads newest first, and

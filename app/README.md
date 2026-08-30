@@ -2,7 +2,7 @@
 
 Upload statement PDFs, parse them, verify each against the statement's own
 printed figures, categorize the rows, and read the month. Single-user,
-self-hosted; the only outbound request is tier 3 (§9.4) and it is a button.
+self-hosted; the only outbound request is tier 3 (Section 9.4) and it is a button.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -134,7 +134,7 @@ it cannot double as "we don't know". Tier 3 obeys the same rule: `unknown` is a
 legal answer from the model and is stored as nothing at all.
 
 **Tier 3 is a button, not something that happens on upload.** It is the only
-request the app makes to anything outside this machine (§9.4), so it happens
+request the app makes to anything outside this machine (Section 9.4), so it happens
 when you press it. The panel on `/merchants` prints the exact payload first —
 merchant keys, one per line, and nothing else.
 
@@ -152,7 +152,7 @@ is not 90% useful, it is a response you cannot reason about. The failure is
 reported on screen rather than folded into the success count.
 
 **"Apply to all matching" also controls whether the choice is remembered.**
-§3 asks for the mapping to be written to tier 2 *and* for applying it to past
+Section 3 asks for the mapping to be written to tier 2 *and* for applying it to past
 rows to be offered. Those cannot be two independent switches: memory feeds the
 re-resolution pass, so anything remembered reaches the past rows on the next
 boot regardless of what the checkbox said. Rather than let the checkbox quietly
@@ -161,7 +161,7 @@ do nothing, it means what it appears to mean.
 **Non-spend rows are categorized without any merchant lookup.** A card payment
 is `Cash & Transfers` because of what kind of row it is, not because anyone
 learned the merchant — that is the `flow` source. A refund is deliberately not
-treated this way: §3 nets refunds against the original merchant, and
+treated this way: Section 3 nets refunds against the original merchant, and
 normalization already keys the refund to that merchant, so it inherits that
 merchant's category instead.
 
@@ -204,7 +204,7 @@ category — is not adding anything.
 
 `gemini-3.7-flash` scored **77% correct, 9% wrong, 14% abstained, gate PASS**
 against a 53% baseline on 2026-08-28. All four wrong answers were merchants that
-are genuinely ambiguous; see DESIGN.md §3 for the breakdown and for the two bugs
+are genuinely ambiguous; see DESIGN.md Section 3 for the breakdown and for the two bugs
 its abstentions uncovered.
 
 **Expect the free tier to be slow rather than broken.** The model answers in
@@ -221,9 +221,9 @@ statements there are zero cross-statement duplicate candidates, and the
 `file_sha256` check plus the issuer reference cover what actually occurs. OCR
 for scanned statements is Phase 4.
 
-`category_confidence` from §5 is still unfilled — a rule, a memory hit and a
+`category_confidence` from Section 5 is still unfilled — a rule, a memory hit and a
 derived flow are all certain, and tier 3 currently expresses doubt by abstaining
 rather than by scoring itself, which is the more honest of the two and needs no
 column. Foreign-currency sublines are parsed into the description but not yet
-split into `amount_minor` + `fx_rate`; the columns exist and DESIGN.md §4 says
+split into `amount_minor` + `fx_rate`; the columns exist and DESIGN.md Section 4 says
 how they should be filled.

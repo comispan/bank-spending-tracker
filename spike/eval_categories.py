@@ -6,12 +6,12 @@
     python spike/eval_categories.py --gemini
     python spike/eval_categories.py --model claude-sonnet-5 --anthropic
 
-Why this exists: DESIGN.md §3 leaves tier 3 as "a model, for the merchants
-nothing else knows", and §9.4 leaves open whether that model runs locally or in
-the cloud. Neither question is answerable by preference. This answers both with
-a number, using the one piece of ground truth the app already has — the
-merchants **you** categorized by hand, in `merchant_memory` with source
-`memory`.
+Why this exists: DESIGN.md Section 3 leaves tier 3 as "a model, for the
+merchants nothing else knows", and Section 9.4 leaves open whether that model
+runs locally or in the cloud. Neither question is answerable by preference.
+This answers both with a number, using the one piece of ground truth the app
+already has — the merchants **you** categorized by hand, in `merchant_memory`
+with source `memory`.
 
 It measures the thing that would actually ship, gate included — literally, since
 the prompt, the schema and the gate are imported from `app/tier3.py` rather than
@@ -30,7 +30,8 @@ Three numbers come out, and the middle one is the one that decides it:
     WRONG       it disagreed, confidently — this is what tier 3 would write
                 into merchant memory and quietly mislabel your spending with
     abstained   it said "unknown" — not a failure. A row that stays uncategorized
-                is honest and one click from fixed. §2.3's whole argument.
+                is honest and one click from fixed. Section 2.3's whole
+                argument.
 
 A `baseline` pseudo-model (always answer your most common category) is scored
 alongside, because a model that cannot beat "always guess Dining" is not
@@ -42,7 +43,7 @@ before the categories are even looked at.
 
 Nothing leaves this machine unless you pass `--gemini` or `--anthropic`, and
 even then only the merchant names — no amounts, dates, balances or card numbers,
-exactly as §3 and §7 promise. The script prints what it is about to send.
+exactly as Sections 3 and 7 promise. The script prints what it is about to send.
 """
 
 from __future__ import annotations

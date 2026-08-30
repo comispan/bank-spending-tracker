@@ -49,7 +49,7 @@ def startup() -> None:
     # Merchant keys and categories are derived, not entered, so a change to
     # merchants.py or categorize.py is allowed to re-key and re-resolve what is
     # already stored — the alternative is old statements silently keeping rules
-    # that no longer exist. Counts, never descriptions: DESIGN.md §7.
+    # that no longer exist. Counts, never descriptions: DESIGN.md Section 7.
     with db.connect() as conn:
         periods = db.backfill_periods(conn)
         foreign = db.backfill_foreign_amounts(conn)
@@ -108,11 +108,12 @@ def sort_headers(sort: str, descending: bool) -> dict[str, dict[str, object]]:
     Clicking the active column flips it; clicking any other starts that column
     at its own natural direction rather than carrying over the current one.
 
-    `newest` is the default order and has no header of its own — it sorts by
-    period *end*, where the Period column sorts by start, and the two are not
-    the same ordering even though this corpus makes them look close. Rather
-    than point the Period header at an ordering it does not describe, the
-    default simply shows no arrow until a column is picked.
+    `newest` has no header of its own — it sorts by period *end*, where the
+    Period column sorts by start, and the two are not the same ordering even
+    though this corpus makes them look close. It is no longer the default, but
+    an old bookmark can still ask for it, and when it does no arrow shows at
+    all rather than pointing the Period header at an ordering it does not
+    describe.
     """
     out: dict[str, dict[str, object]] = {}
     for key, first_click_desc in SORT_FIRST_CLICK_DESC.items():
@@ -128,15 +129,19 @@ def sort_headers(sort: str, descending: bool) -> dict[str, dict[str, object]]:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, error: str | None = None, notice: str | None = None,
-          sort: str = "newest", direction: str = ""):
-    """The upload form and the statement list (§8, Phase 1 step 4).
+          sort: str = "statement", direction: str = ""):
+    """The upload form and the statement list (Section 8, Phase 1 step 4).
+
+    The list opens grouped by card, A-Z: `statement` ascending, which is the
+    column's own natural direction, so the default and a first click on the
+    Statement header land on the same order.
 
     `sort` and `direction` come from a URL, so both are checked against a fixed
     set here and an unknown value falls back to the default — a stale bookmark
     should render the list, not a 422.
     """
     if sort not in db.STATEMENT_ORDERS:
-        sort = "newest"
+        sort = "statement"
     descending = (direction != "asc") if direction else SORT_FIRST_CLICK_DESC[sort]
     with db.connect() as conn:
         statements = db.list_statements(conn, sort, descending)
@@ -218,16 +223,18 @@ async def upload(file: UploadFile, password: str = Form("")):
                 "txn_date": t["date"],
                 "posted_date": t.get("posted_date"),
                 "description_raw": t["description"],
-                # The key tier 2 of the categorizer will look up (DESIGN.md §3).
-                # Stored rather than computed on read so a query can group by it,
-                # and recomputed on boot when the rules change.
+                # The key tier 2 of the categorizer will look up (DESIGN.md
+                # Section 3). Stored rather than computed on read so a query
+                # can group by it, and recomputed on boot when the rules
+                # change.
                 "merchant_normalized": merchants.normalize(t["description"]),
-                # §5's two money columns: what the statement printed, and what
-                # it billed. They differ only on a foreign charge, where the
-                # parser recovers the original figure and the statement's *own*
-                # printed rate (§4) — never today's rate, because that is not
-                # the rate the money changed at. Both figures come off the same
-                # line, so the SGD side is what reconciles either way.
+                # Section 5's two money columns: what the statement printed,
+                # and what it billed. They differ only on a foreign charge,
+                # where the parser recovers the original figure and the
+                # statement's *own* printed rate (Section 4) — never today's
+                # rate, because that is not the rate the money changed at. Both
+                # figures come off the same line, so the SGD side is what
+                # reconciles either way.
                 "amount_minor": db.to_minor(
                     (t.get("foreign") or {}).get("amount") or t["amount"]),
                 "currency": (t.get("foreign") or {}).get("currency") or currency,
@@ -317,7 +324,7 @@ def delete(statement_id: int):
         stored = db.delete_statement(conn, statement_id)
         conn.commit()
     if stored:
-        # Hard delete means the PDF goes too, per DESIGN.md §7.
+        # Hard delete means the PDF goes too, per DESIGN.md Section 7.
         Path(stored).unlink(missing_ok=True)
     return RedirectResponse("/?notice=Statement+deleted", status_code=303)
 
@@ -329,10 +336,10 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
                      merchant: str | None = None, flow: str | None = None):
     """The rows themselves, and where every figure in the report drills through to.
 
-    §4 asks that every number trace back to the transactions behind it, which
-    makes this page the other end of four different links. The filters are
-    therefore shown, not just applied: a filtered list that looks identical to
-    the whole list is how a total gets read as the total when it is a slice.
+    Section 4 asks that every number trace back to the transactions behind it,
+    which makes this page the other end of four different links. The filters
+    are therefore shown, not just applied: a filtered list that looks identical
+    to the whole list is how a total gets read as the total when it is a slice.
     """
     if month and not re.fullmatch(r"\d{4}-\d{2}", month):
         month = None
@@ -421,7 +428,7 @@ def safe_back(back: str) -> str:
 @app.post("/transactions/{txn_id}/category")
 def recategorize(txn_id: int, category: str = Form(""), flow_type: str = Form("spend"),
                  apply_all: str = Form(""), back: str = Form("/transactions")):
-    """One row's category and flow, and optionally every row like it (§3)."""
+    """One row's category and flow, and optionally every row like it (Section 3)."""
     target = safe_back(back)
     if category and category not in categorize.CATEGORIES:
         return RedirectResponse(f"{target}?error=Unknown+category", status_code=303)
@@ -501,8 +508,8 @@ def merchant_sweep(request: Request, all: int = 0,
         "unknown_value_minor": sum(e["value_minor"] or 0 for e in entries if e["unknown"]),
         "tier3_ready": tier3.configured(),
         "tier3_model": tier3.model_name(),
-        # The literal request body, so §9.4's disclosure is something the user
-        # can read rather than a promise they have to take on trust.
+        # The literal request body, so Section 9.4's disclosure is something
+        # the user can read rather than a promise they have to take on trust.
         "tier3_payload": tier3.prompt_payload(unknown_keys),
         "tier3_count": len(unknown_keys),
         "error": error, "notice": notice,
@@ -511,12 +518,12 @@ def merchant_sweep(request: Request, all: int = 0,
 
 @app.post("/merchants/tier3")
 def run_tier3(all: int = Form(0)):
-    """Ask the model about the merchants nothing else knows (DESIGN.md §3, tier 3).
+    """Ask the model about the merchants nothing else knows (Section 3, tier 3).
 
-    Explicitly triggered rather than automatic on upload, and that is §9.4
-    rather than caution for its own sake: this is the only outbound request the
-    app makes, so it happens when the user presses the button and not as a side
-    effect of filing a statement.
+    Explicitly triggered rather than automatic on upload, and that is Section
+    9.4 rather than caution for its own sake: this is the only outbound request
+    the app makes, so it happens when the user presses the button and not as a
+    side effect of filing a statement.
 
     Results are written as guesses, never as decisions. What comes back is
     reported in full — categorized, abstained, and any batch the gate threw

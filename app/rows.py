@@ -80,7 +80,7 @@ REF_VALUE = r"([A-Z0-9][A-Z0-9/-]{5,})"
 REF_LINE = re.compile(rf"(?i)^\s*{REF_LABEL}{REF_VALUE}\s*$")
 REF_INLINE = re.compile(rf"(?i)\b{REF_LABEL}{REF_VALUE}\b")
 
-# A charge in another currency is printed across three lines, not one (§4):
+# A charge in another currency is printed across three lines, not one (Section 4):
 #
 #                          Pinduoduo
 #     02 Jul   04 Jul                   102.67 HKD    16.99
@@ -98,8 +98,8 @@ FOREIGN_DESC = re.compile(
     (?:\s*(?P<cur_post>[A-Z]{3}))?
     \s*$"""
 )
-# `1 HKD = 0.1655 SGD`. The rate the *statement* printed, which §4 requires
-# over today's rate: it is the rate the money actually changed at.
+# `1 HKD = 0.1655 SGD`. The rate the *statement* printed, which Section 4
+# requires over today's rate: it is the rate the money actually changed at.
 FX_RATE_LINE = re.compile(
     r"""(?ix) \b1\s+(?P<from>[A-Z]{3})\s*=\s*
     (?P<rate>\d+(?:\.\d+)?)\s*(?P<to>[A-Z]{3})\b"""

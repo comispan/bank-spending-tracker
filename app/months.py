@@ -1,8 +1,9 @@
 """Calendar months, and how much of one the statements actually cover.
 
-DESIGN.md §4 trap 1: statement cycles are not calendar months, and users think
-in calendar months. So transactions are bucketed by **transaction date**, never
-by which statement they arrived in — that part is a one-line SQL group-by.
+DESIGN.md Section 4 trap 1: statement cycles are not calendar months, and users
+think in calendar months. So transactions are bucketed by **transaction date**,
+never by which statement they arrived in — that part is a one-line SQL
+group-by.
 
 The hard part is the other half of the same trap, and it is what this module is
 for. Every card in the corpus closes on a different day — DBS around the 13th,
@@ -218,12 +219,12 @@ def covers_days(status: dict, days: tuple[int, int]) -> bool:
 def trailing_window(status: dict, earlier: list[dict]) -> tuple[list[dict], list[str], str | None]:
     """Which earlier months may contribute to a trailing average, and why not.
 
-    §4 asks for "vs 3-month average". The averaging is the easy half; deciding
-    what is allowed into it is the half that decides whether the number means
-    anything. An average launders part-billed months better than a single
-    comparison does — three short months produce one low figure with nothing on
-    its face to say it is short, and every month measured against it then reads
-    as an overspend.
+    Section 4 asks for "vs 3-month average". The averaging is the easy half;
+    deciding what is allowed into it is the half that decides whether the
+    number means anything. An average launders part-billed months better than a
+    single comparison does — three short months produce one low figure with
+    nothing on its face to say it is short, and every month measured against it
+    then reads as an overspend.
 
     So a month contributes only if it is billed across at least the days being
     reported, and the caller measures it over exactly those days. Two
