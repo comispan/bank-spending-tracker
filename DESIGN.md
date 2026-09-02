@@ -396,6 +396,62 @@ Any time a user recategorizes a transaction, write the mapping back into tier 2 
 > would have been measured against the wrong hypothesis, and every hour spent
 > tuning wording is an hour not spent on the thing that actually differed.
 
+> **Grounding, built and shipped off, 2026-09-03.** Tier 3 can hand Gemini the
+> `google_search` tool, so a merchant whose registered name says nothing about
+> what it sells can still be identified. `kintsugi pte. ltd` is the case that
+> prompted it — the last uncategorized row in the corpus, and a restaurant group
+> that nothing in the string recovers. Ungrounded, the model answers `unknown`,
+> which is the correct behaviour and still a gap: no amount of model scale
+> recovers a fact that was never in the name, where one registry lookup settles
+> it.
+>
+> **It is a flag, and off, because it changes what Section 9.4 has to disclose.**
+> Without it the merchant names are read by one model; with it they are also
+> issued as Google Search queries. Still names only — no amounts, dates,
+> balances or statement text — but "sent to a model" and "typed into a search
+> engine" are two different promises, and the screen only ever asked for the
+> first. `GEMINI_GROUNDING` is read from the environment or `.env` exactly as
+> the key and the model already are, and `/merchants` prints the wider
+> disclosure above the button whenever it is on.
+>
+> **The grounded path is not graded, and that is why it ships off.**
+> `spike/eval_categories.py --grounding` runs it over the same 43 merchants
+> through the same gate and scorer, but the API key exhausted its prepayment
+> credits before a grounded batch ever completed. Until that number exists the
+> flag is a feature nobody can defend — the same discipline as Section 2.3, and
+> the one tier 3 itself was held to before it shipped.
+>
+> **What the grade should expect to find is a rise in `WRONG`, not only in
+> `correct`.** Of the eleven merchants the ungrounded run missed, only two are
+> registered companies a lookup would settle. Four others — `102.67 hkd`,
+> `store`, `instant checkout` and `2c2` — are a parsing artifact, two generic
+> strings and a gateway code, and those are exactly where search finds
+> *something* and converts an honest abstention into a stored wrong answer. A
+> sourced wrong answer mislabels the spending precisely as an unsourced one
+> does, and it arrives with reasons attached. `GROUNDING_NOTE` tells the model
+> as much in as many words — search does not lower the bar for `unknown` —
+> and whether that instruction holds is what the grade is really measuring.
+>
+> Two implementation notes worth keeping:
+>
+> - **The search instructions are appended to `SYSTEM`, never folded into it**,
+>   so an ungrounded run stays byte-identical to the prompt graded at 77%/9%
+>   above. Turning grounding on has to move one variable, or the eval compares
+>   two changes and credits the tool with both. `selftest.py` asserts that
+>   identity. The schema and the gate are untouched.
+> - **The free-tier grounding allowance documented against the Gemini 2.5 line
+>   is unreachable.** `gemini-2.5-flash` and `gemini-2.5-flash-lite` both appear
+>   in the model listing and both 404 with "no longer available to new users":
+>   the listing is a catalogue, not an entitlement. Structured output alongside
+>   a built-in tool is 3-series only, which is therefore less of a constraint
+>   than it sounds, because the 3-series is what there is.
+>
+> One number came out of the attempt, and it settles a different question.
+> `gemini-3.6-flash`, ungrounded, scored **74% correct, 14% WRONG, 12%
+> abstained** on the same 43 merchants — six confident mislabels where 3.7
+> stores four. That is why `DEFAULT_MODEL` is back at `gemini-3.7-flash`: same
+> set, same prompt, same gate, and this section ranks on WRONG.
+
 **Category set** — keep it small and fixed in v1; a huge taxonomy makes both the LLM and the user worse at choosing:
 
 `Groceries · Dining · Transport · Shopping · Bills & Utilities · Health · Entertainment · Travel · Education · Fees & Interest · Cash & Transfers · Income/Refunds · Other`
@@ -490,7 +546,7 @@ Single-user and self-hosted removes most of the original surface here — there 
 
 - **Extraction discloses nothing.** No API key, no provider, no data terms to read. This was the largest item on this list and Phase 0 deleted it.
 - Statement passwords: use to decrypt in memory, **never store**.
-- The only outbound call is categorization (Section 3, tier 3), and only normalized merchant names — no amounts, dates, or balances. Say so plainly in the UI. Use a provider with no-training-on-inputs terms, or run it locally.
+- The only outbound call is categorization (Section 3, tier 3), and only normalized merchant names — no amounts, dates, or balances. Say so plainly in the UI. Use a provider with no-training-on-inputs terms, or run it locally. **With `GEMINI_GROUNDING` on it is one call to two parties**: the same names also reach Google as search queries. Off by default, disclosed on `/merchants` when it is on, and Section 9.4 treats it as a separate decision for that reason.
 - Full card numbers are masked to last-4 at parse time (`redact()`), before anything is stored or written to disk.
 - Don't bind the server to `0.0.0.0`. Localhost only unless you have deliberately decided otherwise.
 - Offer hard delete: purge PDFs, transactions, and derived data.
@@ -576,7 +632,7 @@ Replay tooling is now half-built by accident and worth finishing deliberately: `
 1. **Which banks?** DBS, MariBank, Standard Chartered, Trust, UOB. All five parse and reconcile today.
 2. **Base currency?** SGD, with each transaction keeping its original amount, currency and the statement's own FX rate. Driven by a real HKD charge in the Trust statement, not a hypothetical.
 3. **Single-user or multi-tenant?** **Single-user, self-hosted.** No auth, no RLS, no tenant scoping. Roughly halves the build and removes most of Section 7.
-4. **Is sending statement text to an LLM acceptable?** Moot for extraction — nothing leaves the machine. The question survives only for categorization (Section 3, tier 3), which sends normalized merchant names and no figures at all. **Settled 2026-08-28: yes, narrowly — a cloud model (Gemini Flash), opt-in, for merchant names only.** What made it acceptable was not the model choice but the shape of the payload: `grab`, `fairprice`, `netflix`, one per line, printed on screen before it is sent. Tier 3 is off until a key is configured, is never triggered by an upload, and its answers are stored as `llm` guesses that can only fill gaps. A local model remains a legitimate answer and the eval grades one the same way — `--model qwen2.5:3b-instruct` — so this is a swap, not a lock-in. **Exercised 2026-08-30** and recorded in Section 3: a free OpenRouter model was wired up, graded against the same 43 merchants and rejected at 60% correct / 16% wrong against Flash's 77% / 9%. The swap mechanism works; that particular model did not, which is the distinction this decision rests on.
+4. **Is sending statement text to an LLM acceptable?** Moot for extraction — nothing leaves the machine. The question survives only for categorization (Section 3, tier 3), which sends normalized merchant names and no figures at all. **Settled 2026-08-28: yes, narrowly — a cloud model (Gemini Flash), opt-in, for merchant names only.** What made it acceptable was not the model choice but the shape of the payload: `grab`, `fairprice`, `netflix`, one per line, printed on screen before it is sent. Tier 3 is off until a key is configured, is never triggered by an upload, and its answers are stored as `llm` guesses that can only fill gaps. A local model remains a legitimate answer and the eval grades one the same way — `--model qwen2.5:3b-instruct` — so this is a swap, not a lock-in. **Exercised 2026-08-30** and recorded in Section 3: a free OpenRouter model was wired up, graded against the same 43 merchants and rejected at 60% correct / 16% wrong against Flash's 77% / 9%. The swap mechanism works; that particular model did not, which is the distinction this decision rests on. **Amended 2026-09-03: grounding widens this, so it is a separate decision and ships off.** With `GEMINI_GROUNDING` on, tier 3 hands the model the `google_search` tool, so the names are also issued as Google Search queries rather than only read by one model. The payload is unchanged — names, one per line, no figures — but the number of parties that see it is not, and what this decision was settled on was the shape of the payload *and* where it goes. It stays off until `spike/eval_categories.py --grounding` produces a number (Section 3), and `/merchants` prints the wider disclosure above the button whenever it is on.
 
 ---
 
