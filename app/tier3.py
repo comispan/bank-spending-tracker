@@ -71,6 +71,34 @@ MAX_ATTEMPTS = 4
 # holding the page open.
 MAX_TOTAL_WAIT_SECONDS = 75
 
+# ------------------------------------------------------------------ grounding
+#
+# Off by default and behind a flag rather than simply on, because it changes
+# what the Section 9.4 disclosure has to say. Without it the merchant names are
+# read by one model; with it they are also issued as Google Search queries.
+# Still names only — no amounts, dates, balances or statement text — but "sent
+# to a model" and "typed into a search engine" are two different promises, and
+# the screen only ever asked for the first.
+#
+# What it buys is the abstention this tier is built to produce. `kintsugi pte.
+# ltd` is a restaurant group; nothing in that string says so, and no amount of
+# model scale recovers a fact that was never in the name. A registry lookup
+# settles it in one query.
+#
+# What it costs is billed searches, latency inside a synchronous web request,
+# and a model with *reasons* to be confident about a merchant it has still
+# misidentified. Section 3 already priced that trade: `WRONG` is the column
+# that decides this, not `correct`, and a sourced wrong answer is stored and
+# mislabels the spending exactly as an unsourced one does.
+#
+# Structured output alongside a built-in tool is Gemini 3-series only, which is
+# less of a constraint than it sounds: the 2.5 models that documented a free
+# grounding allowance are already closed to new API keys ("no longer available
+# to new users"), so the 3-series is what there is. A model that does reject the
+# combination fails with a 4xx, which is not retryable and surfaces the API's
+# own message rather than being swallowed.
+GROUNDING_TOOL = [{"type": "google_search"}]
+
 SYSTEM = f"""You categorize merchants for a personal spending tracker used in Singapore.
 
 You are given normalized merchant names taken from credit card and bank
@@ -88,6 +116,26 @@ Rules:
 - Return every merchant you were given, spelled exactly as given.
 - Return nothing except the JSON.
 """
+
+# Appended to SYSTEM only when the tool is actually attached, rather than
+# folded into it, so an ungrounded run is byte-identical to the prompt Section 3
+# graded at 77% correct / 9% wrong. Turning grounding on has to move one
+# variable, or the eval compares two changes and credits the tool with both.
+GROUNDING_NOTE = f"""
+You have Google Search. Use it on merchant names you do not recognize: many are
+small Singapore companies whose registered name says nothing about what they
+sell, and one lookup of the company or the brand usually settles it.
+
+Search does not lower the bar for "{ABSTAIN}". If a lookup does not identify the
+business, answer "{ABSTAIN}" anyway — a sourced guess is still a guess, and it is
+stored and mislabels someone's spending exactly as an unsourced one does.
+"""
+
+
+def system_prompt(grounding: bool) -> str:
+    """The system turn, with the search instructions attached only when they apply."""
+    return SYSTEM + GROUNDING_NOTE if grounding else SYSTEM
+
 
 SCHEMA = {
     "type": "object",
@@ -112,20 +160,12 @@ SCHEMA = {
 
 # ------------------------------------------------------------------ the key
 
-def api_key() -> str | None:
-    """The Gemini key, from the environment or a gitignored `.env`.
+def _from_env_file(name: str) -> str | None:
+    """One setting out of the gitignored `.env` beside the app.
 
-    Never a constant, never a file inside `app/`, and never anything the app
-    writes: the key is the user's credential and this module only ever reads
-    it. `.env` is already in `.gitignore` alongside `data/`, so supporting it
-    costs nothing and saves setting an environment variable in every shell that
-    launches uvicorn.
+    `.env` is already in `.gitignore` alongside `data/`, so reading it costs
+    nothing and saves setting variables in every shell that launches uvicorn.
     """
-    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            return value
-
     env_file = Path(__file__).parent.parent / ".env"
     if not env_file.exists():
         return None
@@ -133,9 +173,34 @@ def api_key() -> str | None:
         line = line.strip()
         if line.startswith("#") or "=" not in line:
             continue
-        name, _, value = line.partition("=")
-        if name.strip() in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        key, _, value = line.partition("=")
+        if key.strip() == name:
             return value.strip().strip("'\"") or None
+    return None
+
+
+def _setting(name: str) -> str | None:
+    """One setting, environment first so a shell can always override the file."""
+    return (os.environ.get(name) or "").strip() or _from_env_file(name)
+
+
+def api_key() -> str | None:
+    """The Gemini key, from the environment or a gitignored `.env`.
+
+    Never a constant, never a file inside `app/`, and never anything the app
+    writes: the key is the user's credential and this module only ever reads it.
+
+    Both names are tried in the environment before either is tried in the file,
+    so a shell variable wins over the file whichever of the two names it uses.
+    """
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        value = _from_env_file(name)
+        if value:
+            return value
     return None
 
 
@@ -144,7 +209,16 @@ def configured() -> bool:
 
 
 def model_name() -> str:
-    return (os.environ.get("GEMINI_MODEL") or "").strip() or DEFAULT_MODEL
+    return _setting("GEMINI_MODEL") or DEFAULT_MODEL
+
+
+def grounding_enabled() -> bool:
+    """Whether tier 3 hands the model Google Search. Off unless asked for.
+
+    Read the same way as the key and the model, so the one file that already
+    configures this tier configures all of it.
+    """
+    return (_setting("GEMINI_GROUNDING") or "").lower() in ("1", "true", "yes", "on")
 
 
 # --------------------------------------------------------------- the payload
@@ -205,13 +279,17 @@ def retry_delay(error: urllib.error.HTTPError, attempt: int) -> float:
 
 
 def ask_gemini(keys: list[str], model: str | None = None,
-               key: str | None = None, thinking: str = "low") -> str:
+               key: str | None = None, thinking: str = "low",
+               grounding: bool | None = None) -> str:
     """One batch out to Gemini, raw response text back. No parsing, no writing.
 
     Temperature is deliberately left at the model default: Google's guidance for
     the Gemini 3 models is to leave it alone, and the determinism that a zero
     would buy is not worth being the one caller fighting the model's tuning. The
     gate is what makes the output safe to use, not the sampling settings.
+
+    `grounding=None` takes the configured default; True and False force it, so
+    the eval can grade both without editing the environment it is measuring.
     """
     key = key or api_key()
     if not key:
@@ -219,9 +297,10 @@ def ask_gemini(keys: list[str], model: str | None = None,
             "No Gemini API key. Set GEMINI_API_KEY in the environment, or put "
             "GEMINI_API_KEY=... in a .env file at the project root.")
 
+    grounding = grounding_enabled() if grounding is None else grounding
     payload = {
         "model": model or model_name(),
-        "system_instruction": SYSTEM,
+        "system_instruction": system_prompt(grounding),
         "input": prompt_payload(keys),
         "generation_config": {"thinking_level": thinking},
         "response_format": {
@@ -230,6 +309,11 @@ def ask_gemini(keys: list[str], model: str | None = None,
             "schema": SCHEMA,
         },
     }
+    if grounding:
+        # The schema stays. Search arrives as extra steps in the response; the
+        # answer is still in a model_output step, and `_output_text` already
+        # picks that out rather than taking the last step it sees.
+        payload["tools"] = GROUNDING_TOOL
     def build() -> urllib.request.Request:
         return urllib.request.Request(
             ENDPOINT,
@@ -342,7 +426,8 @@ def gate(raw: str, asked: list[str]) -> tuple[bool, list[str], dict[str, str]]:
 # ------------------------------------------------------------------ classify
 
 def classify(keys: list[str], model: str | None = None,
-             key: str | None = None) -> dict[str, object]:
+             key: str | None = None,
+             grounding: bool | None = None) -> dict[str, object]:
     """Categorize unknown merchants, one chunk at a time.
 
     Returns what happened rather than raising, because a partial result is
@@ -356,6 +441,7 @@ def classify(keys: list[str], model: str | None = None,
     """
     keys = [k for k in keys if k]
     chunks = [keys[i:i + BATCH_SIZE] for i in range(0, len(keys), BATCH_SIZE)]
+    grounding = grounding_enabled() if grounding is None else grounding
 
     assignments: dict[str, str] = {}
     abstained: list[str] = []
@@ -364,7 +450,7 @@ def classify(keys: list[str], model: str | None = None,
 
     for chunk in chunks:
         try:
-            raw = ask_gemini(chunk, model=model, key=key)
+            raw = ask_gemini(chunk, model=model, key=key, grounding=grounding)
         except Tier3Error as e:
             problems.append(str(e))
             continue
@@ -386,4 +472,7 @@ def classify(keys: list[str], model: str | None = None,
         "asked": len(keys),
         "batches": len(chunks),
         "batches_ok": batches_ok,
+        # Reported rather than assumed, so the caller can say where the names
+        # actually went instead of repeating what the setting said at boot.
+        "grounding": grounding,
     }

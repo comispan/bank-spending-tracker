@@ -1105,6 +1105,16 @@ def test_tier3_gate() -> None:
     check("...and the shipping prompt and schema", ev.SYSTEM is tier3.SYSTEM
           and ev.SCHEMA is tier3.SCHEMA)
 
+    # Grounding is a flag on that same prompt, not a second prompt. An
+    # ungrounded run has to stay byte-identical to what Section 3 graded, or
+    # the eval is comparing two changes at once and crediting the tool with
+    # both of them.
+    check("grounding off leaves the graded prompt untouched",
+          tier3.system_prompt(False) is tier3.SYSTEM)
+    check("...and grounding on only appends to it",
+          tier3.system_prompt(True).startswith(tier3.SYSTEM)
+          and len(tier3.system_prompt(True)) > len(tier3.SYSTEM))
+
 
 def test_tier3_client() -> None:
     """Everything around the network call, without making one.
@@ -1143,9 +1153,11 @@ def test_tier3_client() -> None:
     # must contribute nothing at all.
     keys = [f"m{i}" for i in range(tier3.BATCH_SIZE + 3)]
     calls: list[list[str]] = []
+    grounded: list[bool] = []
 
-    def fake_ask(chunk, model=None, key=None, thinking="low"):
+    def fake_ask(chunk, model=None, key=None, thinking="low", grounding=False):
         calls.append(list(chunk))
+        grounded.append(grounding)
         pairs = [(m, "Dining") for m in chunk]
         if len(calls) == 2:
             pairs = pairs[:-1]          # a merchant silently dropped
@@ -1153,11 +1165,15 @@ def test_tier3_client() -> None:
             pairs[0] = (pairs[0][0], tier3.ABSTAIN)
         return json.dumps({"assignments": [{"merchant": m, "category": c} for m, c in pairs]})
 
+    # `grounding_enabled` is stubbed too, or this asserts the developer's own
+    # `.env` rather than the default the app ships with.
     real_ask, tier3.ask_gemini = tier3.ask_gemini, fake_ask
+    real_flag, tier3.grounding_enabled = tier3.grounding_enabled, lambda: False
     try:
         result = tier3.classify(keys, key="test")
     finally:
         tier3.ask_gemini = real_ask
+        tier3.grounding_enabled = real_flag
 
     check("a batch larger than one call is split", len(calls) == 2, repr([len(c) for c in calls]))
     check("no chunk exceeds the batch size",
@@ -1168,6 +1184,24 @@ def test_tier3_client() -> None:
     check("...and says why", any("dropped" in p for p in result["problems"]),
           repr(result["problems"]))
     check("a good chunk still applies when another fails", result["batches_ok"] == 1)
+
+    # Section 9.4 again: the search tool is opt-in, and the screen that asks
+    # permission builds its wording from what comes back rather than from what
+    # the setting said at boot. So the flag has to reach the client and it has
+    # to be reported, and neither is worth taking on trust.
+    check("grounding is off unless it is asked for", grounded == [False, False],
+          repr(grounded))
+    check("...and the result says so", result["grounding"] is False)
+
+    calls.clear()
+    grounded.clear()
+    real_ask, tier3.ask_gemini = tier3.ask_gemini, fake_ask
+    try:
+        forced = tier3.classify(["grab"], key="test", grounding=True)
+    finally:
+        tier3.ask_gemini = real_ask
+    check("grounding forced on reaches the client", grounded == [True], repr(grounded))
+    check("...and is reported back", forced["grounding"] is True)
     check("an abstention is never returned as an assignment",
           "m0" not in result["assignments"] and result["abstained"] == ["m0"],
           repr(result["abstained"]))
