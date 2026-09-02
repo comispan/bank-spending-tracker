@@ -224,6 +224,4 @@ for scanned statements is Phase 4.
 `category_confidence` from Section 5 is still unfilled — a rule, a memory hit and a
 derived flow are all certain, and tier 3 currently expresses doubt by abstaining
 rather than by scoring itself, which is the more honest of the two and needs no
-column. Foreign-currency sublines are parsed into the description but not yet
-split into `amount_minor` + `fx_rate`; the columns exist and DESIGN.md Section 4 says
-how they should be filled.
+column.
