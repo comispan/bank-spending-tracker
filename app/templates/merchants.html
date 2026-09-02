@@ -54,6 +54,15 @@
     no balances, no card numbers, no statement text:
   </p>
   <pre class="payload">{{ tier3_payload }}</pre>
+  {% if tier3_grounding %}
+  <p class="hint">
+    <strong>Google Search is on.</strong> These names are also sent to Google as
+    search queries, not just read by the model — which is what lets it recognize
+    a company whose name says nothing about what it sells. Still names only, and
+    still nothing else. Remove <code>GEMINI_GROUNDING</code> from your
+    environment or <code>.env</code> and restart to turn it off.
+  </p>
+  {% endif %}
   {% if tier3_ready %}
     <form method="post" action="/merchants/tier3">
       <input type="hidden" name="all" value="{{ 1 if show_all else 0 }}">

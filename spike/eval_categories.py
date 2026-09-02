@@ -4,6 +4,7 @@
     python spike/eval_categories.py --model baseline
     python spike/eval_categories.py --model qwen2.5:3b-instruct
     python spike/eval_categories.py --gemini
+    python spike/eval_categories.py --gemini --grounding
     python spike/eval_categories.py --model claude-sonnet-5 --anthropic
 
 Why this exists: DESIGN.md Section 3 leaves tier 3 as "a model, for the
@@ -44,6 +45,15 @@ before the categories are even looked at.
 Nothing leaves this machine unless you pass `--gemini` or `--anthropic`, and
 even then only the merchant names — no amounts, dates, balances or card numbers,
 exactly as Sections 3 and 7 promise. The script prints what it is about to send.
+
+`--grounding` adds Google Search to the Gemini run, which is the one option here
+that widens *where* the names go rather than which model reads them: they become
+search queries too. It is off in the app unless `GEMINI_GROUNDING` says
+otherwise, and this flag forces it on regardless, so a grounded and an
+ungrounded run can be graded back to back without editing the setting between
+them. Read the `WRONG` column first — search buys answers on merchants whose
+name carries nothing, and it also lets a model be confident about one it has
+misidentified.
 """
 
 from __future__ import annotations
@@ -142,15 +152,17 @@ def ask_anthropic(model: str, keys: list[str], effort: str | None) -> str:
     return next((b.text for b in resp.content if b.type == "text"), "")
 
 
-def ask_gemini(model: str, keys: list[str]) -> str:
+def ask_gemini(model: str, keys: list[str], grounding: bool) -> str:
     """Straight through the shipping client, so this grades the real thing.
 
     Including its failure modes: a bad model id or a rejected schema arrives
     here as a Tier3Error with the API's own message, which is the same thing the
-    app would show.
+    app would show. `grounding` is passed explicitly rather than left to default,
+    so the run is graded on the flag you typed and not on what `.env` happens to
+    say today.
     """
     try:
-        return tier3.ask_gemini(keys, model=model)
+        return tier3.ask_gemini(keys, model=model, grounding=grounding)
     except tier3.Tier3Error as e:
         sys.exit(str(e))
 
@@ -211,6 +223,10 @@ def main() -> int:
                     help="send the merchant names to the Gemini API (leaves this machine). "
                          "This is what tier 3 ships with; --model defaults to "
                          f"{tier3.DEFAULT_MODEL}")
+    ap.add_argument("--grounding", action="store_true",
+                    help="give the Gemini run Google Search (the merchant names become "
+                         "search queries as well as model input). Off in the app unless "
+                         "GEMINI_GROUNDING is set; this forces it on for one run.")
     ap.add_argument("--anthropic", action="store_true",
                     help="send the merchant names to the Anthropic API (leaves this machine)")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
@@ -227,6 +243,8 @@ def main() -> int:
     # you have to look up to run the grader at all.
     if args.gemini and not args.model:
         args.model = tier3.model_name()
+    if args.grounding and not args.gemini:
+        ap.error("--grounding applies to --gemini; the other backends have no search tool")
 
     truth = ground_truth()
     if not truth:
@@ -258,7 +276,13 @@ def main() -> int:
         print(f"\n  Sending {len(keys)} merchant names to the Gemini API "
               f"({args.model}).")
         print("  No amounts, dates, balances or card numbers are included.")
-        raw_fn = lambda: ask_gemini(args.model, keys)  # noqa: E731
+        if args.grounding:
+            # Said plainly and separately, because it is a different promise
+            # from the one the line above makes: the names reach Google Search,
+            # not only the model.
+            print("  Google Search is ON: these names are also sent to Google as "
+                  "search queries.")
+        raw_fn = lambda: ask_gemini(args.model, keys, args.grounding)  # noqa: E731
     elif args.anthropic:
         print(f"\n  Sending {len(keys)} merchant names to the Anthropic API "
               f"({args.model}).")
@@ -274,11 +298,15 @@ def main() -> int:
 
     ok, problems, answers = gate(raw, keys)
     s = score(answers, truth)
-    report(args.model, s, ok, problems, seconds)
+    label = args.model + (" + Google Search" if args.grounding else "")
+    report(label, s, ok, problems, seconds)
 
     OUT.mkdir(parents=True, exist_ok=True)
-    detail = OUT / f"eval-{args.model.replace(':', '-').replace('/', '-')}.txt"
-    lines = [f"model: {args.model}", f"gate: {'PASS' if ok else 'FAIL'}"]
+    slug = args.model.replace(':', '-').replace('/', '-')
+    if args.grounding:
+        slug += "-grounded"
+    detail = OUT / f"eval-{slug}.txt"
+    lines = [f"model: {label}", f"gate: {'PASS' if ok else 'FAIL'}"]
     lines += [f"  problem: {p}" for p in problems]
     lines += ["", f"{'merchant':34} {'you said':20} {'it said':20} verdict", ""]
     for key, want in truth.items():

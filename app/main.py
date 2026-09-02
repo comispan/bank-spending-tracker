@@ -508,6 +508,10 @@ def merchant_sweep(request: Request, all: int = 0,
         "unknown_value_minor": sum(e["value_minor"] or 0 for e in entries if e["unknown"]),
         "tier3_ready": tier3.configured(),
         "tier3_model": tier3.model_name(),
+        # Part of the same disclosure: with search on, the names reach Google
+        # as queries and not only the model, and the screen has to say so
+        # before the button is pressed rather than after.
+        "tier3_grounding": tier3.grounding_enabled(),
         # The literal request body, so Section 9.4's disclosure is something
         # the user can read rather than a promise they have to take on trust.
         "tier3_payload": tier3.prompt_payload(unknown_keys),
@@ -548,7 +552,8 @@ def run_tier3(all: int = Form(0)):
         moved = db.recategorize_all(conn)
         conn.commit()
 
-    parts = [f"{stored} merchant(s) categorized by {tier3.model_name()}",
+    searched = " with Google Search" if result["grounding"] else ""
+    parts = [f"{stored} merchant(s) categorized by {tier3.model_name()}{searched}",
              f"{moved} transaction(s) moved"]
     if result["abstained"]:
         parts.append(f"{len(result['abstained'])} left unknown by the model")
