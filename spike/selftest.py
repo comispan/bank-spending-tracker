@@ -688,6 +688,30 @@ def test_cycle_dates() -> None:
     check("a statement cycle is read as a period",
           got.period == ("2026-06-17", "2026-07-17"), repr(got.period))
 
+    # One Trust statement wrapped the cycle's trailing year onto its own line
+    # and left the label wedged between the two dates. The start keeps its
+    # year; the end's is completed by rollover.
+    wrapped = ("Block 90B                          18 May 2026 - 16 Jun\n"
+               "                                   Statement cycle\n"
+               "                                   2026\n"
+               "                                   Statement balance S$1,722.18\n")
+    check("a cycle whose end-year wrapped away is still read",
+          rows.document_context([wrapped]).period == ("2026-05-18", "2026-06-16"),
+          repr(rows.document_context([wrapped]).period))
+
+    # Same wrap across a year boundary: end month < start month, so + 1 year.
+    yearend = ("18 Dec 2025 - 17 Jan\n   Statement cycle\n   2026\n")
+    check("a wrapped cycle rolls the year at December",
+          rows.document_context([yearend]).period == ("2025-12-18", "2026-01-17"),
+          repr(rows.document_context([yearend]).period))
+
+    # The loose match must not fire on a bare range with no cycle label near it
+    # — a payment-due line, say, that happens to sit above a dated row.
+    nolabel = "Payment due date 1 Jul 2026\n   1 Jul 2026 - 16 Jun\n"
+    check("a bare range with no cycle label is not read as a period",
+          rows.document_context([nolabel]).period == (None, None),
+          repr(rows.document_context([nolabel]).period))
+
 
 def test_merchant_normalization() -> None:
     """The key tier 2 of the categorizer looks up (DESIGN.md Section 3).

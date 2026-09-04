@@ -211,6 +211,29 @@ PERIOD_RE = re.compile(
     (?P<b>\d{{1,2}}[ /-](?:{MONTH_RE})[a-z]*[ /-]\d{{2,4}}|\d{{1,2}}/\d{{1,2}}/\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}})
     """
 )
+
+# The same cycle range, for the one layout where PERIOD_RE's anchors have moved
+# out of its reach. Trust normally prints "Statement cycle 18 May 2026 - 16 Jun
+# 2026" on one line; on one statement pdfplumber's layout mode wrapped the
+# trailing year below the label and left the label wedged between the dates:
+#     18 May 2026 - 16 Jun
+#     Statement cycle
+#     2026
+# so PERIOD_RE finds neither a leading label nor an end-year. This matches on
+# the *start* date's four-digit year alone — a transaction row is a bare "18
+# May" and never carries one — and requires a cycle/period label within the
+# same neighbourhood. The end year, when absent, is completed by rollover from
+# the start: a cycle is contiguous and about a month, so a range that starts
+# "18 May 2026" and ends "16 Jun" can only end in 2026.
+PERIOD_WRAPPED_RE = re.compile(
+    rf"""(?ix)
+    (?P<a>\d{{1,2}}[ /-](?:{MONTH_RE})[a-z]*[ /-]\d{{4}})
+    \s*(?:to|-|–|until)\s*
+    (?P<b>\d{{1,2}}[ /-](?:{MONTH_RE})[a-z]*)(?![ /-]?\d)
+    """
+)
+CYCLE_LABEL_RE = re.compile(r"(?i)statement\s+cycle|statement\s+period|billing\s+cycle")
+PERIOD_MAX_DAYS = 45      # a billing cycle is about a month; past this it is not one
 LAST4_RE = re.compile(r"(?:\*{2,}|x{4,}|X{4,}|•{2,})[\s-]*(\d{4})\b")
 CURRENCY_RE = re.compile(r"\b(SGD|USD|EUR|GBP|AUD|JPY|MYR|HKD)\b")
 YEAR_RE = re.compile(r"\b(20[1-4]\d)\b")
@@ -305,6 +328,37 @@ class Context(NamedTuple):
     statement_date: str | None = None
 
 
+def _wrapped_period(joined: str) -> tuple[str | None, str | None]:
+    """A statement cycle whose end-year has wrapped out of PERIOD_RE's reach.
+
+    Anchored on the start date's four-digit year and a nearby cycle label; the
+    end year, if the wrap took it, is completed by rollover from the start.
+    Returns (None, None) unless the result is a sane forward cycle.
+    """
+    for m in PERIOD_WRAPPED_RE.finditer(joined):
+        # A wide-ish window: layout mode pads every line to the page width, so
+        # a label two lines from the range is a couple of hundred characters
+        # away by the time the text is joined.
+        window = joined[max(0, m.start() - 220):m.end() + 220]
+        if not CYCLE_LABEL_RE.search(window):
+            continue
+        start = _parse_loose_date(m.group("a"))
+        end_tok = DATE_TOKEN.match(m.group("b"))
+        if not start or not end_tok:
+            continue
+        sd = dt.date.fromisoformat(start)
+        day, month, year = _token_to_parts(end_tok)
+        if year is None:
+            year = sd.year + 1 if month < sd.month else sd.year
+        try:
+            ed = dt.date(year, month, day)
+        except ValueError:
+            continue
+        if sd < ed <= sd + dt.timedelta(days=PERIOD_MAX_DAYS):
+            return start, ed.isoformat()
+    return None, None
+
+
 def document_context(texts: list[str]) -> Context:
     """Resolve the period and year once for the whole statement, not per page.
 
@@ -320,6 +374,8 @@ def document_context(texts: list[str]) -> Context:
     m = PERIOD_RE.search(joined)
     if m:
         period = (_parse_loose_date(m.group("a")), _parse_loose_date(m.group("b")))
+    else:
+        period = _wrapped_period(joined)
 
     # Most frequent year, not the largest: statements print next year's payment
     # due date, and a card's expiry, neither of which dates the transactions.
