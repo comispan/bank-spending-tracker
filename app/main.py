@@ -394,6 +394,24 @@ def delete(statement_id: int):
     return RedirectResponse("/?notice=Statement+deleted", status_code=303)
 
 
+@app.post("/statements/delete-all")
+def delete_all():
+    """Purge every statement at once (Section 7 hard delete).
+
+    Same effect as deleting each statement in turn: transactions and PDFs go,
+    accounts and merchant memory stay. Guarded by a confirm dialog in the UI
+    because there is no undo.
+    """
+    with db.connect() as conn:
+        stored = db.delete_all_statements(conn)
+        conn.commit()
+    for path in stored:
+        Path(path).unlink(missing_ok=True)
+    n = len(stored)
+    return RedirectResponse(
+        f"/?notice={n}+statement(s)+deleted", status_code=303)
+
+
 @app.get("/transactions", response_class=HTMLResponse)
 def all_transactions(request: Request, error: str | None = None, notice: str | None = None,
                      uncategorized: int = 0, month: str | None = None,
