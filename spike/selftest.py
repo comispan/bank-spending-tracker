@@ -1493,6 +1493,86 @@ def test_transaction_page() -> None:
           empty["total"] == 0 and empty["pages"] == 1 and empty["rows"] == [], repr(empty))
 
 
+def test_analytics() -> None:
+    """`db.analytics` — the month breakdowns across every *complete* month.
+
+    The invariant worth protecting: only complete months are compared, the
+    part-billed ones are named and excluded, and the pivot's per-row average
+    divides by the number of months on the page (the zeroes are real), not by
+    the months a label happened to appear in.
+    """
+    print("\nanalytics")
+    import sqlite3
+    import db
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    conn.execute("INSERT INTO account (id, issuer, kind, last4) VALUES (1, 'DBS', 'credit', '1111')")
+
+    # One card, statements tiling 2025-12-20 → 2026-04-15. Jan/Feb/Mar are then
+    # covered end to end (complete); April only to the 15th (part-billed).
+    for i, (ps, pe) in enumerate([
+        ("2025-12-20", "2026-01-31"), ("2026-02-01", "2026-02-28"),
+        ("2026-03-01", "2026-03-31"), ("2026-04-01", "2026-04-15"),
+    ], start=1):
+        conn.execute(
+            """INSERT INTO statement (id, account_id, filename, file_sha256, storage_path,
+                                      period_start, period_end, page_count, parser_version,
+                                      status, verdict)
+               VALUES (?, 1, ?, ?, ?, ?, ?, 1, 't', 'parsed', 'pass')""",
+            (i, f"s{i}.pdf", f"hash{i}", f"/s{i}", ps, pe))
+
+    def txn(tid, ym_day, cat, flow, minor):
+        conn.execute(
+            """INSERT INTO txn (id, account_id, statement_id, txn_date, description_raw,
+                                merchant_normalized, amount_minor, currency, amount_sgd_minor,
+                                direction, flow_type, category)
+               VALUES (?, 1, 1, ?, ?, ?, ?, 'SGD', ?, 'debit', ?, ?)""",
+            (tid, f"2026-{ym_day}", cat or "shop", (cat or "shop").lower(), minor, minor, flow, cat))
+
+    tid = 0
+    for mth in ("01", "02", "03", "04"):
+        for day, cat, flow, minor in [("05", "Dining", "spend", 1000),
+                                      ("10", "Groceries", "spend", 2000),
+                                      ("12", None, "transfer", 5000)]:
+            tid += 1
+            txn(tid, f"{mth}-{day}", cat, flow, minor)
+    # March gets an extra Dining hit, so its peak lands there.
+    tid += 1
+    txn(tid, "03-20", "Dining", "spend", 4000)
+
+    a = db.analytics(conn)
+    check("only the complete months are compared",
+          a["months"] == ["2026-01", "2026-02", "2026-03"], repr(a["months"]))
+    check("the part-billed month is named, not silently dropped",
+          [e["month"] for e in a["excluded"]] == ["2026-04"]
+          and "15" in a["excluded"][0]["why"], repr(a["excluded"]))
+    check("enough is set once two complete months exist", a["enough"] is True)
+
+    dining = next(r for r in a["by_category"] if r["label"] == "Dining")
+    check("a category row carries a cell per complete month",
+          set(dining["per_month"]) == {"2026-01", "2026-02", "2026-03"}, repr(dining["per_month"]))
+    check("the average divides by months on the page, not months present",
+          dining["avg"] == round((1000 + 1000 + 5000) / 3), dining["avg"])
+    check("the peak month is the row's own maximum", dining["peak_month"] == "2026-03",
+          dining["peak_month"])
+    check("a zero-spend category (all transfers) is dropped from the grid",
+          not any(r["label"] in (None, "shop") for r in a["by_category"]), repr(a["by_category"]))
+
+    flows = {r["label"]: r["total"] for r in a["excluded_flows"]}
+    check("held-out flows are summed gross, not netted to zero",
+          flows.get("transfer") == 5000 * 3, repr(flows))
+
+    # Fewer than two complete months: no comparison, but still honest about why.
+    conn.execute("DELETE FROM statement WHERE id IN (2, 3)")
+    thin = db.analytics(conn)
+    check("one complete month is not enough to compare", thin["enough"] is False)
+    check("the thin answer still lists what it is waiting on",
+          {e["month"] for e in thin["excluded"]} >= {"2026-02", "2026-03", "2026-04"},
+          repr(thin["excluded"]))
+
+
 def test_cli_runs() -> None:
     """Actually invoke the CLI.
 
@@ -1638,6 +1718,7 @@ if __name__ == "__main__":
     test_statement_sort()
     test_row_parse_notes()
     test_transaction_page()
+    test_analytics()
     test_cli_runs()
     test_reconciliation()
     test_sanity_checks()
