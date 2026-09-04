@@ -55,6 +55,7 @@ def startup() -> None:
         periods = db.backfill_periods(conn)
         foreign = db.backfill_foreign_amounts(conn)
         parse_flags = db.backfill_parse_flags(conn)
+        descriptions = db.backfill_descriptions(conn)
         moved = db.renormalize_merchants(conn)
         seeded = db.seed_memory(conn)
         recategorized = db.recategorize_all(conn)
@@ -62,6 +63,7 @@ def startup() -> None:
     for label, n in (("statement periods re-read", periods),
                      ("foreign charges split", foreign),
                      ("row parse-flags replayed", parse_flags),
+                     ("descriptions replayed", descriptions),
                      ("merchant keys recomputed", moved),
                      ("merchants seeded", seeded),
                      ("transactions recategorized", recategorized)):

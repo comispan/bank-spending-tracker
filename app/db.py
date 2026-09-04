@@ -390,6 +390,47 @@ def backfill_parse_flags(conn: sqlite3.Connection) -> int:
     return len(updates)
 
 
+def backfill_descriptions(conn: sqlite3.Connection) -> int:
+    """Replay the parser's description onto rows read before the merchant-above fix.
+
+    MariBank (and Trust's real statement, as opposed to the synthetic fixture)
+    print the merchant on its own line above a row and a payment-channel tag
+    below it ("Card Payment", "Instant Checkout") — never the reverse. `rows.py`
+    used to look only below, so most of every MariBank statement's description
+    was that channel tag rather than the merchant it paid. `Card Payment` also
+    happens to be the exact phrase `categorize.py` uses to detect a credit-card
+    bill payment, so those rows were additionally mis-set to `flow_type =
+    transfer` and dropped from spend entirely — `renormalize_merchants` and
+    `recategorize_all`, run right after this on every boot, correct that once
+    the real merchant is in `description_raw`.
+
+    Replayed off `page_text` and matched on `(date, amount)` within the
+    statement, the same argument as `backfill_parse_flags`.
+    """
+    updates = []
+    for stmt in conn.execute(
+        "SELECT id, page_text FROM statement WHERE page_text IS NOT NULL"
+    ):
+        pages = json.loads(stmt["page_text"] or "[]")
+        if not pages:
+            continue
+        ctx = rows.document_context(pages)
+        desc: dict[tuple[str, int | None], str] = {}
+        for page in pages:
+            for t in rows.parse_page(page, ctx.period, ctx.year, ctx.statement_date)["transactions"]:
+                desc[(t["date"], to_minor(t["amount"]))] = t["description"]
+        for row in conn.execute(
+            "SELECT id, txn_date, amount_sgd_minor, description_raw FROM txn WHERE statement_id = ?",
+            (stmt["id"],)
+        ):
+            want = desc.get((row["txn_date"], row["amount_sgd_minor"]))
+            if want and want != row["description_raw"]:
+                updates.append((want, merchants.normalize(want), row["id"]))
+    conn.executemany(
+        "UPDATE txn SET description_raw = ?, merchant_normalized = ? WHERE id = ?", updates)
+    return len(updates)
+
+
 def renormalize_merchants(conn: sqlite3.Connection) -> int:
     """Recompute merchant_normalized wherever it no longer matches the parser.
 

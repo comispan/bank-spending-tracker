@@ -104,6 +104,11 @@ FX_RATE_LINE = re.compile(
     r"""(?ix) \b1\s+(?P<from>[A-Z]{3})\s*=\s*
     (?P<rate>\d+(?:\.\d+)?)\s*(?P<to>[A-Z]{3})\b"""
 )
+# The other wording issuers use for the same subline: `FOREIGN CURRENCY EUR
+# 285.00 @ 1.4456` rather than `1 EUR = ... SGD`. Same job, same risk if it is
+# ever mistaken for the *next* row's merchant: it always sits directly above
+# whatever transaction follows it.
+FOREIGN_NOTE_LINE = re.compile(r"(?i)^\s*foreign\s+currency\b")
 
 
 class Row:
@@ -587,13 +592,42 @@ def _description_below(lines: list[str], i: int, lookahead: int = 2) -> str:
     return ""
 
 
-def _description_above(lines: list[str], i: int, lookback: int = 2) -> str:
-    """Merchant text on the line(s) over a row, for the foreign-currency shape.
+# The closed vocabulary of a transaction-table column header, seen across
+# every issuer's own wording ("Post Trans Date", "Transaction Posting Date",
+# "POSTED DATE TRANSACTION DATE", "DATE DESCRIPTION AMOUNT (S$)"). A line built
+# entirely from these words is a header wherever it lands, never a merchant —
+# no real business is named only "Description" or "Date Date SGD" — which
+# matters because a header sits two lines above the first row of every page,
+# exactly where `_description_above` looks for MariBank's merchant line.
+_HEADER_WORDS = frozenset({
+    "date", "dates", "description", "amount", "amounts", "transaction",
+    "transactions", "posted", "posting", "post", "trans", "of", "sgd", "usd",
+    "s", "currency", "particulars", "details",
+})
 
-    The mirror of `_description_below`, and bounded the same way: it stops at a
-    dated line or one carrying an amount, so a merchant name can only ever be
-    claimed from the gap above its own row and never lifted off the previous
-    transaction.
+
+def _is_header_line(text: str) -> bool:
+    words = re.findall(r"[A-Za-z$]+", text)
+    return bool(words) and all(w.strip("$").lower() in _HEADER_WORDS for w in words)
+
+
+def _description_above(lines: list[str], i: int, lookback: int = 1) -> str:
+    """Merchant text on the line(s) over a row.
+
+    Bounded like `_description_below`: it stops at a dated line or one
+    carrying an amount, so a merchant name can only ever be claimed from the
+    gap above its own row and never lifted off the previous transaction.
+
+    A reference line, an FX-rate subline (either wording), or a column header
+    is noise here, not a merchant — UOB and DBS print a reference directly
+    above the *next* row's date, a foreign-currency row's rate note sits
+    directly above whatever transaction follows it, and a header sits directly
+    above the first row of a page (sometimes wrapped across two, as Trust's
+    "Transaction / date" split) — so all are skipped like a numeric line. The
+    default of 1 is deliberate, not just conservative: every merchant-above
+    shape actually seen (MariBank, and the foreign-currency row below) has the
+    name on the line immediately above, and reaching further is what let a
+    two-line header two rows up get claimed as a merchant.
     """
     examined = 0
     for j in range(i - 1, -1, -1):
@@ -604,6 +638,10 @@ def _description_above(lines: list[str], i: int, lookback: int = 2) -> str:
             continue
         if DATE_TOKEN.match(lines[j]) or AMOUNT_TAIL.search(lines[j]):
             break
+        if (REF_LINE.match(lines[j]) or FX_RATE_LINE.search(lines[j])
+                or FOREIGN_NOTE_LINE.match(lines[j]) or _is_header_line(candidate)):
+            examined += 1
+            continue
         if re.search(r"[A-Za-z]{2,}", candidate):
             return re.sub(r"\s{2,}", " ", candidate)
         examined += 1
@@ -717,15 +755,32 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
             if not parsed:
                 continue
             amount, direction, description, ambiguous = parsed
-            if not description:
-                # Some issuers put the merchant on its own line under the row,
-                # leaving date/date/amount alone on the first. Two dates is a
-                # strong enough row signal to keep it and go looking; a single
-                # bare date with a number is not, and is usually a due date or
-                # a rate table.
-                if len(dates) < 2:
-                    continue
-                description = _description_below(lines, i)
+            if len(dates) >= 2 and not (description and _foreign_amount(description)):
+                # MariBank (and Trust's real layout, as opposed to the synthetic
+                # fixture) print the merchant on its own line above the row and
+                # a payment-channel tag ("Card Payment", "Instant Checkout")
+                # below it — never the reverse. A merchant name that wraps
+                # leaves its second word on the dated line itself, ahead of the
+                # amount: "Nintendo Official Store" above, "Singapore -620.69"
+                # on the row. `_description_above` already excludes reference
+                # lines, so it costs nothing to try on issuers that put the
+                # whole description inline (UOB, DBS) — there it finds nothing
+                # and this is a no-op. A row whose leftover is itself a bare
+                # foreign figure is excluded so the dedicated handling below,
+                # which claims the same "above" line for a different field,
+                # still gets an untouched figure to work with.
+                above = _description_above(lines, i)
+                if above:
+                    description = f"{above} {description}".strip() if description else above
+                elif not description:
+                    # Some issuers put the merchant on its own line under the
+                    # row instead, leaving date/date/amount alone on the first.
+                    description = _description_below(lines, i)
+            elif not description:
+                # A single bare date with a number is not a strong enough row
+                # signal to go looking for a description — usually a due date
+                # or a rate table.
+                continue
 
             # Some issuers rule the opening and closing balance into the
             # transaction table itself, dated like any other row — Trust prints
