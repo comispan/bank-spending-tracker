@@ -1560,6 +1560,16 @@ def test_analytics() -> None:
     check("a zero-spend category (all transfers) is dropped from the grid",
           not any(r["label"] in (None, "shop") for r in a["by_category"]), repr(a["by_category"]))
 
+    # The chart layer walks `cells` (per_month in page order, gaps filled) and
+    # `peak_minor` (the value the sparkline dot and the heat shading key off).
+    check("cells is per_month in page order with gaps filled",
+          dining["cells"] == [1000, 1000, 5000], repr(dining["cells"]))
+    check("peak_minor is the largest cell", dining["peak_minor"] == 5000, dining["peak_minor"])
+    groceries = next(r for r in a["by_category"] if r["label"] == "Groceries")
+    check("a flat row still has a defined peak, not a crash",
+          groceries["peak_minor"] == 2000 and groceries["peak_month"] in a["months"],
+          (groceries["peak_minor"], groceries["peak_month"]))
+
     flows = {r["label"]: r["total"] for r in a["excluded_flows"]}
     check("held-out flows are summed gross, not netted to zero",
           flows.get("transfer") == 5000 * 3, repr(flows))

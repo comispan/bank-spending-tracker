@@ -1036,7 +1036,12 @@ def _pivot(rows: list[sqlite3.Row], months: list[str], top: int | None = None) -
         out = out[:top]
     for e in out:
         e["avg"] = round(e["total"] / len(months)) if months else 0
-        e["peak_month"] = max(e["per_month"], key=e["per_month"].get) if e["per_month"] else None
+        # `cells` is `per_month` in page order with the gaps filled — what the
+        # sparkline and the heat shading both walk.
+        e["cells"] = [e["per_month"].get(ym, 0) for ym in months]
+        e["peak_minor"] = max(e["cells"], default=0)
+        e["peak_month"] = (months[e["cells"].index(e["peak_minor"])]
+                           if e["peak_minor"] > 0 else None)
     return out
 
 
