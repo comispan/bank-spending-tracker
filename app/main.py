@@ -54,12 +54,14 @@ def startup() -> None:
     with db.connect() as conn:
         periods = db.backfill_periods(conn)
         foreign = db.backfill_foreign_amounts(conn)
+        parse_flags = db.backfill_parse_flags(conn)
         moved = db.renormalize_merchants(conn)
         seeded = db.seed_memory(conn)
         recategorized = db.recategorize_all(conn)
         conn.commit()
     for label, n in (("statement periods re-read", periods),
                      ("foreign charges split", foreign),
+                     ("row parse-flags replayed", parse_flags),
                      ("merchant keys recomputed", moved),
                      ("merchants seeded", seeded),
                      ("transactions recategorized", recategorized)):
@@ -259,6 +261,11 @@ def ingest_statement(payload: bytes, filename: str, password: str | None) -> Ing
                 "direction": t["direction"],
                 "source_page": t.get("source_page"),
                 "reference": t.get("reference"),
+                # A parse-time note (rows.py): the row carried more than one
+                # amount, so this figure may be a running balance. Surfaced per
+                # row on the statement page so the aggregate warning is
+                # traceable.
+                "amount_ambiguous": t.get("amount_ambiguous", False),
                 # Same reasoning as the duplicate warning in parsing.py: without
                 # the issuer's reference, two real charges collide here and a
                 # future cross-statement check would mark one a duplicate of the
@@ -326,6 +333,43 @@ async def upload_bulk(files: list[UploadFile]):
     return redirect("/", notice=notice, error=error)
 
 
+def row_parse_notes(txns: list) -> dict[int, list[dict[str, str]]]:
+    """Which rows each row-level warning on a statement is actually about.
+
+    The statement's `warnings` are printed as aggregate counts ("41 row(s)
+    carried more than one amount"); this maps them back onto the rows so the
+    table can mark them. Two kinds:
+
+    * `amount_ambiguous` — a parse-time flag stored on the row (rows.py): the
+      line carried more than one amount, so the figure may be a running balance.
+    * identical rows — recomputed here from `dedup_key`, which is exactly the
+      tuple `sanity_checks` counts, so this names the same rows the warning does.
+    """
+    notes: dict[int, list[dict[str, str]]] = {}
+
+    def add(txn_id: int, tag: str, detail: str) -> None:
+        notes.setdefault(txn_id, []).append({"tag": tag, "detail": detail})
+
+    for t in txns:
+        if t["amount_ambiguous"]:
+            add(t["id"], "multi-amount",
+                "the row carried more than one amount — the figure shown may be "
+                "a running balance, not the transaction")
+
+    by_key: dict[str, list[int]] = {}
+    for t in txns:
+        if t["dedup_key"]:
+            by_key.setdefault(t["dedup_key"], []).append(t["id"])
+    for ids in by_key.values():
+        if len(ids) > 1:
+            for txn_id in ids:
+                add(txn_id, "repeat",
+                    f"identical date, amount and description to {len(ids) - 1} "
+                    f"other row(s) here — a genuine repeat, or a page read twice")
+
+    return notes
+
+
 @app.get("/statements/{statement_id}", response_class=HTMLResponse)
 def statement_detail(request: Request, statement_id: int,
                      notice: str | None = None, error: str | None = None):
@@ -338,7 +382,8 @@ def statement_detail(request: Request, statement_id: int,
     return templates.TemplateResponse(request, "statement.html", {
         "s": stmt, "txns": txns, "totals": totals,
         "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
-        "warnings": json.loads(stmt["warnings"]), "notice": notice, "error": error,
+        "warnings": json.loads(stmt["warnings"]), "notes": row_parse_notes(txns),
+        "notice": notice, "error": error,
     })
 
 
@@ -365,6 +410,9 @@ def review(request: Request, statement_id: int, page: int = 1):
         "text": page_text[page - 1] if page_text else "",
         "txns": [t for t in txns if t["source_page"] == page],
         "warnings": json.loads(stmt["warnings"]),
+        # Computed over the whole statement, not just this page: a row read
+        # twice can land its copy on another page.
+        "notes": row_parse_notes(txns),
     })
 
 

@@ -280,6 +280,20 @@ def test_row_parsing() -> None:
           home["transactions"][0]["foreign"]["currency"] is None,
           repr(home["transactions"][0]))
 
+    # A row carrying more than one amount is kept, but marked: "the last number"
+    # may be a running balance, not the transaction. The mark rides on the row
+    # so the aggregate warning can be traced to it, and a single-amount row
+    # next to it stays unmarked.
+    multi = rows.parse_page(
+        "          02 Jul   02 Jul   SHOP ONE            12.34    900.00\n"
+        "          03 Jul   03 Jul   SHOP TWO             5.00\n",
+        ("2026-06-17", "2026-07-17"), 2026)
+    check("a row with two amounts is flagged ambiguous",
+          [t["amount_ambiguous"] for t in multi["transactions"]] == [True, False],
+          repr([(t["description"], t["amount_ambiguous"]) for t in multi["transactions"]]))
+    check("the ambiguous-row counter still agrees with the per-row flags",
+          multi["_ambiguous_rows"] == 1, repr(multi["_ambiguous_rows"]))
+
 
     # Trust rules its opening and closing balance into the transaction table,
     # dated like any other row. Counted as purchases they roughly double the
@@ -1530,6 +1544,32 @@ def test_sanity_checks() -> None:
     check("empty statement flagged", any("no transactions" in w for w in r2.warnings))
 
 
+def test_row_parse_notes() -> None:
+    """`main.row_parse_notes` — the map from an aggregate parse warning to the
+    rows it is actually about, which is what the statement table marks.
+    """
+    print("\nrow parse notes")
+    import main
+
+    rows_in = [
+        {"id": 1, "amount_ambiguous": 1, "dedup_key": "a"},
+        {"id": 2, "amount_ambiguous": 0, "dedup_key": "b"},
+        {"id": 3, "amount_ambiguous": 0, "dedup_key": "b"},
+        {"id": 4, "amount_ambiguous": 0, "dedup_key": ""},
+        {"id": 5, "amount_ambiguous": 0, "dedup_key": ""},
+    ]
+    notes = main.row_parse_notes(rows_in)
+
+    check("the multi-amount row is noted", {n["tag"] for n in notes.get(1, [])} == {"multi-amount"},
+          repr(notes.get(1)))
+    check("both sides of an identical pair are noted",
+          [n["tag"] for n in notes.get(2, [])] == ["repeat"]
+          and [n["tag"] for n in notes.get(3, [])] == ["repeat"], repr(notes))
+    check("a row that is neither gets no note", 4 not in notes and 5 not in notes, repr(notes))
+    check("an empty dedup_key is not treated as a group",
+          not any(n["tag"] == "repeat" for n in notes.get(4, [])), repr(notes.get(4)))
+
+
 if __name__ == "__main__":
     test_write_is_platform_independent()
     test_read_is_tolerant()
@@ -1546,6 +1586,7 @@ if __name__ == "__main__":
     test_tier3_client()
     test_tier3_retries()
     test_statement_sort()
+    test_row_parse_notes()
     test_cli_runs()
     test_reconciliation()
     test_sanity_checks()
