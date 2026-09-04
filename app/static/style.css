@@ -70,6 +70,10 @@ a { color: var(--accent); }
 }
 
 .upload { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+.bulk-heading {
+  margin: 1.5rem 0 .6rem; padding-top: 1.25rem;
+  border-top: 1px solid var(--line);
+}
 input[type=file], input[type=password] {
   padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 7px;
   background: var(--bg); color: var(--ink); font: inherit; font-size: .9rem;

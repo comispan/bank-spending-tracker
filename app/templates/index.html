@@ -12,6 +12,18 @@
     Parsed on this machine. Nothing is sent anywhere, and any password is used to
     decrypt in memory and never stored.
   </p>
+
+  <h2 class="bulk-heading">Bulk upload</h2>
+  <form method="post" action="/upload-bulk" enctype="multipart/form-data" class="upload">
+    <input type="file" name="files" accept="application/pdf" multiple required>
+    <button type="submit">Upload all</button>
+  </form>
+  <p class="hint">
+    Pick several PDFs at once. <strong>No passwords</strong> — a bulk run can't
+    stop to ask for each one, so any locked file is skipped and reported.
+    Decrypt those and upload them singly above. Files already on file are
+    skipped; the rest go through independently.
+  </p>
 </section>
 
 <h2>Statements</h2>
