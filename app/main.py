@@ -464,13 +464,20 @@ def delete_all():
 def all_transactions(request: Request, error: str | None = None, notice: str | None = None,
                      uncategorized: int = 0, month: str | None = None,
                      category: str | None = None, account: int | None = None,
-                     merchant: str | None = None, flow: str | None = None):
+                     merchant: str | None = None, flow: str | None = None,
+                     page: int = 1):
     """The rows themselves, and where every figure in the report drills through to.
 
     Section 4 asks that every number trace back to the transactions behind it,
     which makes this page the other end of four different links. The filters
     are therefore shown, not just applied: a filtered list that looks identical
     to the whole list is how a total gets read as the total when it is a slice.
+
+    The rows are paged — a category control per row makes the unpaged page
+    multi-megabyte once the corpus is a few thousand rows — but `total` and the
+    net-spend figure are computed over the whole filtered slice by
+    `db.transaction_page`, so a report figure still reconciles against what the
+    page says even when the slice runs to many pages.
     """
     if month and not re.fullmatch(r"\d{4}-\d{2}", month):
         month = None
@@ -479,55 +486,28 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
     if flow and flow not in categorize.FLOW_TYPES:
         flow = None
     with db.connect() as conn:
-        clauses, args = [], []
-        if uncategorized:
-            clauses.append("t.category IS NULL")
-        if month:
-            clauses.append("substr(t.txn_date, 1, 7) = ?")
-            args.append(month)
-        if category == "(uncategorized)":
-            clauses.append("t.category IS NULL")
-        elif category:
-            clauses.append("t.category = ?")
-            args.append(category)
-        if account:
-            clauses.append("t.account_id = ?")
-            args.append(account)
-        if merchant:
-            clauses.append("t.merchant_normalized = ?")
-            args.append(merchant)
-        if flow:
-            clauses.append("t.flow_type = ?")
-            args.append(flow)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        txns = conn.execute(
-            f"""SELECT t.*, a.issuer, a.last4 FROM txn t
-                JOIN account a ON a.id = t.account_id
-                {where}
-                ORDER BY t.txn_date DESC, t.id DESC""", args
-        ).fetchall()
+        result = db.transaction_page(
+            conn, uncategorized=bool(uncategorized), month=month, category=category,
+            account=account, merchant=merchant, flow=flow, page=page)
         stats = db.coverage(conn)
         account_name = conn.execute(
             """SELECT issuer || CASE WHEN last4 IS NULL THEN '' ELSE ' ····' || last4 END
                  AS label FROM account WHERE id = ?""", (account,)).fetchone() if account else None
-    # Net spend of exactly what is on screen, so a drill-through from a figure
-    # in the report can be checked against the figure it came from. The
-    # whole-corpus coverage line below it answers a different question and is
-    # kept separate rather than quietly rescoped.
-    shown = sum(t["amount_sgd_minor"] if t["flow_type"] == "spend"
-                else -t["amount_sgd_minor"] if t["flow_type"] == "refund" else 0
-                for t in txns)
     active = [("month", month, month), ("category", category, category),
               ("account", account, account_name["label"] if account_name else None),
               ("merchant", merchant, merchant), ("flow", flow, flow)]
     return templates.TemplateResponse(request, "transactions.html", {
-        "txns": txns, "stats": stats, "uncategorized_only": bool(uncategorized),
+        "txns": result["rows"], "total": result["total"],
+        "page": result["page"], "pages": result["pages"], "per_page": result["per_page"],
+        "stats": stats, "uncategorized_only": bool(uncategorized),
         "filters": [(k, v, label) for k, v, label in active if v],
+        # Filters only — the page number is added to links separately, so a
+        # filter change always lands back on page 1 rather than off the end.
         "query": urlencode({k: v for k, v in
                             [("month", month), ("category", category), ("account", account),
                              ("merchant", merchant), ("flow", flow),
                              ("uncategorized", uncategorized or None)] if v}),
-        "shown_minor": shown,
+        "shown_minor": result["shown_minor"],
         "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
         "error": error, "notice": notice,
     })

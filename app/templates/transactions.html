@@ -3,7 +3,10 @@
 {% block title %}Transactions{% endblock %}
 {% block content %}
 
-<h1>{{ txns|length }} transactions</h1>
+{% set back = '/transactions?' ~ (query ~ '&' if query else '') ~ 'page=' ~ page %}
+{% set page_base = '/transactions?' ~ (query ~ '&' if query else '') %}
+
+<h1>{{ total }} transaction{{ 's' if total != 1 }}</h1>
 <p class="hint">
   {% if filters %}A slice, newest first{% else %}Every card, newest first{% endif %}.
   The small grey line under a description is the merchant key the categorizer
@@ -13,8 +16,9 @@
 </p>
 
 {# A filtered list that looks like the whole list is how a slice gets read as
-   the total. The figure here is the net spend of what is on screen, so a
-   drill-through can be checked against the figure it came from. #}
+   the total. The figure here is the net spend of the whole filtered slice —
+   not just the visible page — so a drill-through can be checked against the
+   figure it came from however many pages the slice runs to. #}
 {% if filters %}
 <section class="coverage">
   <p>
@@ -58,15 +62,31 @@
 </section>
 {% endif %}
 
+{% macro pager(page, pages, per_page, total, base) %}
+  {% if pages > 1 %}
+  <nav class="pager">
+    {% if page > 1 %}<a href="{{ base }}page={{ page - 1 }}" rel="prev">‹ Prev</a>{% endif %}
+    <span class="muted">
+      Page {{ page }} of {{ pages }} —
+      rows {{ (page - 1) * per_page + 1 }}–{{ [page * per_page, total] | min }} of {{ total }}
+    </span>
+    {% if page < pages %}<a href="{{ base }}page={{ page + 1 }}" rel="next">Next ›</a>{% endif %}
+  </nav>
+  {% endif %}
+{% endmacro %}
+
 {% if not txns %}
   <p class="empty">
     {% if uncategorized_only %}
       Nothing uncategorized. <a href="/transactions">Show all.</a>
+    {% elif page > 1 %}
+      Nothing on page {{ page }}. <a href="{{ page_base }}page=1">Back to the first page.</a>
     {% else %}
       Nothing yet. <a href="/">Upload a statement.</a>
     {% endif %}
   </p>
 {% else %}
+{{ pager(page, pages, per_page, total, page_base) }}
 <table>
   <thead>
     <tr>
@@ -93,7 +113,7 @@
         {% endif %}
       </td>
       <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
-      <td>{{ m.category_cell(t, categories, flow_types, '/transactions' + ('?' + query if query else '')) }}</td>
+      <td>{{ m.category_cell(t, categories, flow_types, back) }}</td>
       <td class="num muted">
         {%- if t.source_page -%}
           <a href="/statements/{{ t.statement_id }}/pdf#page={{ t.source_page }}"
@@ -104,6 +124,7 @@
   {% endfor %}
   </tbody>
 </table>
+{{ pager(page, pages, per_page, total, page_base) }}
 {% endif %}
 
 {% endblock %}
