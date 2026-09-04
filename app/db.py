@@ -573,6 +573,22 @@ def delete_statement(conn: sqlite3.Connection, statement_id: int) -> str | None:
     return row["storage_path"]
 
 
+def delete_all_statements(conn: sqlite3.Connection) -> list[str]:
+    """Hard delete every statement and its transactions, per Section 7.
+
+    Returns the stored file paths to unlink. Accounts are left in place — they
+    hold no statement data and re-attach on the next upload — matching what a
+    one-by-one delete of the same statements would leave behind. Merchant
+    memory and rules are also kept: they are the user's own decisions, not
+    statement-derived, and clearing them is the separate control on /rules.
+    """
+    paths = [r["storage_path"]
+             for r in conn.execute("SELECT storage_path FROM statement")]
+    conn.execute("DELETE FROM txn")
+    conn.execute("DELETE FROM statement")
+    return paths
+
+
 # ------------------------------------------------------------------- reads
 
 # The orderings the statement list offers, as a fixed map. The key arrives

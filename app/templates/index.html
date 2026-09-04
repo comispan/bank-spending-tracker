@@ -26,11 +26,17 @@
   </p>
 </section>
 
-<h2>Statements</h2>
-
 {% if not statements %}
+  <h2>Statements</h2>
   <p class="empty">Nothing uploaded yet.</p>
 {% else %}
+<div class="head">
+  <h2>Statements</h2>
+  <form method="post" action="/statements/delete-all"
+        onsubmit="return confirm('Delete all {{ statements|length }} statements, their transactions and PDFs? This cannot be undone.')">
+    <button class="danger" type="submit">Delete all</button>
+  </form>
+</div>
 <table>
   <thead>
     <tr>
