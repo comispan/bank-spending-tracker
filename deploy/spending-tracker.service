@@ -1,0 +1,19 @@
+# systemd unit for the app. deploy/setup.sh installs this after substituting
+# the real user and repo path for the __USER__ / __REPO__ placeholders — do not
+# copy this file to /etc/systemd/system by hand.
+
+[Unit]
+Description=bank-spending-tracker (uvicorn)
+After=network.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__REPO__
+# 127.0.0.1 on purpose: the app is reached through an SSH tunnel, never a
+# public port. The security group blocks 8000 anyway; this is the second lock.
+ExecStart=__REPO__/.venv/bin/python -m uvicorn main:app --app-dir app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -5,6 +5,8 @@ spike/passwords.json
 
 # App data: uploaded statement PDFs and the local database.
 data/
+# Copies of data/ pulled off the EC2 instance by deploy/backup.ps1.
+backups/
 
 .venv/
 __pycache__/
