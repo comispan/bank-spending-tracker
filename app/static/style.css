@@ -233,6 +233,20 @@ td.actions form { display: inline; }
        min-width: 1px; }
 .bar.unknown { background: var(--warn); }
 
+/* Analytics — the month breakdowns laid out across every complete month. A
+   dense numeric grid: months read left to right, the peak month in each row is
+   marked, and it scrolls inside its own box rather than widening the page. */
+.gridwrap { overflow-x: auto; margin: .5rem 0 1.75rem; }
+table.grid { font-variant-numeric: tabular-nums; }
+table.grid th, table.grid td { padding: .4rem .55rem; white-space: nowrap; }
+table.grid td.gridcell a { color: inherit; text-decoration: none; }
+table.grid td.gridcell a:hover { color: var(--accent); text-decoration: underline; }
+table.grid td.peak { font-weight: 650; }
+table.grid td.gridtotal { font-weight: 600; border-left: 1px solid var(--line); }
+table.grid th.num a { color: var(--muted); text-decoration: none; }
+table.grid th.num a:hover { color: var(--accent); }
+tr.footrow td { border-top: 2px solid var(--line); border-bottom: 0; font-weight: 600; }
+
 /* The bulk merchant screen. The example line is the column that makes a key
    recognizable — `bus/mrt` means nothing until you see the line it came from —
    so it gets room, but not so much that the category select falls off screen. */

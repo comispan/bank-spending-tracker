@@ -1012,6 +1012,110 @@ def month_detail(conn: sqlite3.Connection, ym: str) -> dict[str, Any]:
     }
 
 
+# Net-spend expression, `t.`-qualified so it works alongside a JOIN.
+_SPEND = """CASE WHEN t.flow_type = 'spend'  THEN t.amount_sgd_minor
+                 WHEN t.flow_type = 'refund' THEN -t.amount_sgd_minor
+                 ELSE 0 END"""
+
+
+def _pivot(rows: list[sqlite3.Row], months: list[str], top: int | None = None) -> list[dict[str, Any]]:
+    """Turn (label, ym, v, n) rows into one row per label with a cell per month.
+
+    `avg` divides by the number of months on the page, not by the months this
+    label happened to appear in: a category bought in three of seven complete
+    months averages over seven, because the four zeroes are real.
+    """
+    agg: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        e = agg.setdefault(r["label"], {"label": r["label"], "per_month": {}, "total": 0, "n": 0})
+        e["per_month"][r["ym"]] = r["v"]
+        e["total"] += r["v"]
+        e["n"] += r["n"]
+    out = sorted(agg.values(), key=lambda e: -e["total"])
+    if top is not None:
+        out = out[:top]
+    for e in out:
+        e["avg"] = round(e["total"] / len(months)) if months else 0
+        e["peak_month"] = max(e["per_month"], key=e["per_month"].get) if e["per_month"] else None
+    return out
+
+
+def analytics(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The month report's breakdowns, but across every *complete* month at once.
+
+    A complete month is one where every card is billed for the whole of it
+    (`months.month_completeness`). Only those are compared: a part-billed month
+    dropped into a category-by-month grid is a low column with nothing on its
+    face to say it is short, and every trend read off the grid would be wrong.
+    The months left out are listed with the reason, so the page is honest about
+    its own scope rather than just showing fewer columns.
+    """
+    report = month_report(conn)          # newest first, each with completeness
+    months = sorted(m["month"] for m in report if m["is_complete"])
+
+    excluded = []
+    for m in report:
+        if m["is_complete"]:
+            continue
+        if m["covered_from"]:
+            why = (f"billed only for days {int(m['covered_from'][8:10])}"
+                   f"–{int(m['covered_through'][8:10])}")
+        else:
+            parts = []
+            if m["missing"]:
+                parts.append("no statement for " + ", ".join(m["missing"]))
+            if m["gaps"]:
+                parts.append("a cycle missing for " + ", ".join(m["gaps"]))
+            why = "; ".join(parts) or "cannot be bounded"
+        excluded.append({"month": m["month"], "why": why})
+    excluded.sort(key=lambda e: e["month"])
+
+    if len(months) < 2:
+        return {"months": months, "excluded": excluded, "enough": False}
+
+    marks = ",".join("?" * len(months))
+
+    per_month = {r["ym"]: r["v"] for r in conn.execute(
+        f"""SELECT substr(t.txn_date, 1, 7) AS ym, COALESCE(SUM({_SPEND}), 0) AS v
+            FROM txn t WHERE substr(t.txn_date, 1, 7) IN ({marks}) GROUP BY 1""", months)}
+    series = [{"month": ym, "spend": per_month.get(ym, 0)} for ym in months]
+    spends = [s["spend"] for s in series]
+
+    def grid(label_sql: str, join: str = "", where: str = "", top: int | None = None,
+             value: str = _SPEND):
+        return _pivot(conn.execute(
+            f"""SELECT {label_sql} AS label, substr(t.txn_date, 1, 7) AS ym,
+                       COALESCE(SUM({value}), 0) AS v, COUNT(*) AS n
+                FROM txn t {join}
+                WHERE substr(t.txn_date, 1, 7) IN ({marks}) {where}
+                GROUP BY 1, 2""", months).fetchall(), months, top)
+
+    card_label = ("a.issuer || CASE WHEN a.last4 IS NULL THEN '' "
+                  "ELSE ' ····' || a.last4 END")
+    return {
+        "months": months,
+        "excluded": excluded,
+        "enough": True,
+        "series": series,
+        "avg_minor": round(sum(spends) / len(spends)),
+        "max_minor": max(spends),
+        "min_minor": min(spends),
+        # A category whose rows in these months are all transfers or income
+        # nets to zero spend — real on the single-month page, just noise as a
+        # row of dots in a grid, so drop it here.
+        "by_category": [r for r in grid("COALESCE(t.category, '(uncategorized)')")
+                        if r["total"] > 0],
+        "by_card": grid(card_label, join="JOIN account a ON a.id = t.account_id"),
+        "by_merchant": grid("t.merchant_normalized",
+                            where="AND t.merchant_normalized <> ''", top=12),
+        # Held-out flows are shown at their gross amount, the way the single
+        # month page shows them — a card payment is the same money moving and
+        # netting it would say nothing.
+        "excluded_flows": grid("t.flow_type", where="AND t.flow_type <> 'spend'",
+                               value="t.amount_sgd_minor"),
+    }
+
+
 def merchant_summary(conn: sqlite3.Connection, unknown_only: bool = True) -> list[dict[str, Any]]:
     """One row per merchant key, for categorizing in bulk.
 

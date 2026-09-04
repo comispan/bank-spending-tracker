@@ -597,6 +597,22 @@ def month_view(request: Request, ym: str):
     })
 
 
+@app.get("/analytics", response_class=HTMLResponse)
+def analytics(request: Request):
+    """The month page's breakdowns, side by side across every complete month.
+
+    Only complete months (every card billed for all of it) are compared — the
+    part-billed ones are named and left out rather than dropped into the grid
+    as short columns that read as a dip in spending.
+    """
+    with db.connect() as conn:
+        data = db.analytics(conn)
+        cards = {r["label"]: r["id"] for r in conn.execute(
+            """SELECT id, issuer || CASE WHEN last4 IS NULL THEN '' ELSE ' ····' || last4 END
+                 AS label FROM account""")} if data["enough"] else {}
+    return templates.TemplateResponse(request, "analytics.html", {"a": data, "cards": cards})
+
+
 @app.get("/merchants", response_class=HTMLResponse)
 def merchant_sweep(request: Request, all: int = 0,
                    error: str | None = None, notice: str | None = None):

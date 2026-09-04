@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Analytics{% endblock %}
+{% block content %}
+
+<h1>Analytics</h1>
+<p class="hint">
+  Every <strong>complete</strong> month, side by side — the same breakdowns the
+  individual month page shows, but across the whole run. A month counts as
+  complete only when every card is billed for all of it; the part-billed ones
+  are left out and named below, because a short month dropped into a
+  category-by-month grid is a low column with nothing on its face to say so.
+</p>
+
+{% if not a.enough %}
+  <p class="empty">
+    Nothing to compare yet — this needs at least two complete months and there
+    {{ 'is' if a.months | length == 1 else 'are' }} {{ a.months | length or 'none' }}.
+    {% if a.excluded %}
+      Waiting on:
+      {% for e in a.excluded %}<br>· <strong>{{ e.month }}</strong> — {{ e.why }}{% endfor %}
+    {% endif %}
+  </p>
+{% else %}
+
+<p class="hint">
+  {{ a.months | length }} complete months: {{ a.months | join(', ') }}.
+  {% if a.excluded %}
+    Left out —
+    {% for e in a.excluded %}{{ e.month }} ({{ e.why }}){{ '; ' if not loop.last }}{% endfor %}.
+  {% endif %}
+</p>
+
+{% macro grid(rows, kind) %}
+<div class="gridwrap">
+<table class="grid">
+  <thead>
+    <tr>
+      <th>{{ kind | capitalize }}</th>
+      {% for ym in a.months %}<th class="num"><a href="/months/{{ ym }}">{{ ym[5:] }}</a></th>{% endfor %}
+      <th class="num">Avg</th>
+      <th class="num">Total</th>
+      <th class="num">Rows</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>
+        {%- if kind == 'card' and cards.get(r.label) -%}
+          <a href="/transactions?account={{ cards[r.label] }}">{{ r.label }}</a>
+        {%- elif kind == 'merchant' -%}
+          <a href="/transactions?merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a>
+        {%- elif kind == 'category' -%}
+          <a href="/transactions?category={{ r.label | urlencode }}">{{ r.label }}</a>
+        {%- elif kind == 'flow' -%}
+          <a href="/transactions?flow={{ r.label | urlencode }}"><span class="flowtag {{ r.label }}">{{ r.label }}</span></a>
+        {%- else -%}{{ r.label }}{%- endif -%}
+      </td>
+      {% for ym in a.months %}
+        {% set v = r.per_month.get(ym, 0) %}
+        <td class="num gridcell{{ ' peak' if ym == r.peak_month and r.per_month | length > 1 }}">
+          {%- if v -%}
+            {%- set q = 'category=' ~ (r.label | urlencode) if kind == 'category'
+                   else 'account=' ~ cards.get(r.label, '') if kind == 'card'
+                   else 'merchant=' ~ (r.label | urlencode) if kind == 'merchant'
+                   else 'flow=' ~ (r.label | urlencode) -%}
+            <a href="/transactions?month={{ ym }}&{{ q }}">{{ v | money }}</a>
+          {%- else -%}<span class="muted">·</span>{%- endif -%}
+        </td>
+      {% endfor %}
+      <td class="num muted">{{ r.avg | money }}</td>
+      <td class="num gridtotal">{{ r.total | money }}</td>
+      <td class="num muted">{{ r.n }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}
+
+<h2>Spend per month</h2>
+<table>
+  <thead><tr><th>Month</th><th></th><th class="num">Spend</th><th class="num">vs average</th></tr></thead>
+  <tbody>
+  {% for s in a.series %}
+    <tr>
+      <td><a href="/months/{{ s.month }}"><strong>{{ s.month }}</strong></a></td>
+      <td class="barcell">
+        <span class="bar" style="width: {{ (100 * s.spend / a.max_minor) | round | int if a.max_minor > 0 else 0 }}%"></span>
+      </td>
+      <td class="num">{{ s.spend | money }}</td>
+      <td class="num">
+        <span class="{{ 'credit' if s.spend < a.avg_minor }}">
+          {{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }}
+        </span>
+      </td>
+    </tr>
+  {% endfor %}
+    <tr class="footrow">
+      <td>Average</td><td></td>
+      <td class="num">{{ a.avg_minor | money }}</td>
+      <td class="num muted">{{ a.min_minor | money }} – {{ a.max_minor | money }}</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>By category</h2>
+{{ grid(a.by_category, 'category') }}
+
+<h2>By card</h2>
+{{ grid(a.by_card, 'card') }}
+
+<h2>Top merchants</h2>
+{{ grid(a.by_merchant, 'merchant') }}
+
+{% if a.excluded_flows %}
+<h2>Not counted as spending</h2>
+<p class="hint">
+  Card payments, transfers, fees and income, at their gross amount — held out
+  of every figure above for the same reason the month page holds them out.
+</p>
+{{ grid(a.excluded_flows, 'flow') }}
+{% endif %}
+
+{% endif %}
+
+{% endblock %}
