@@ -30,6 +30,27 @@
   {% endif %}
 </p>
 
+{# ---------- a 7-point sparkline, normalised to the row's own range ---------- #}
+{% macro spark(cells, peak) %}
+  {%- set w = 104 -%}{%- set h = 24 -%}
+  {%- set lo = cells | min -%}{%- set hi = cells | max -%}
+  {%- set span = (hi - lo) or 1 -%}
+  {%- set n = cells | length -%}
+  {%- set flat = hi == lo -%}
+  <svg class="spark" viewBox="0 0 {{ w }} {{ h }}" width="{{ w }}" height="{{ h }}">
+    <title>{{ cells | map('money') | join(' · ') }}</title>
+    <polyline points="
+      {%- for v in cells -%}
+        {{ (loop.index0 * (w - 2) / (n - 1) + 1) | round(1) }},{{ (h / 2 if flat else h - 3 - (v - lo) / span * (h - 6)) | round(1) }}{{ ' ' }}
+      {%- endfor -%}"/>
+    {%- set pi = cells.index(peak) -%}
+    <circle class="pk" r="2.1"
+            cx="{{ (pi * (w - 2) / (n - 1) + 1) | round(1) }}"
+            cy="{{ (h / 2 if flat else h - 3 - (peak - lo) / span * (h - 6)) | round(1) }}"/>
+  </svg>
+{% endmacro %}
+
+{# ---------- one breakdown, a month-by-month grid shaded like a heatmap ------ #}
 {% macro grid(rows, kind) %}
 <div class="gridwrap">
 <table class="grid">
@@ -37,6 +58,7 @@
     <tr>
       <th>{{ kind | capitalize }}</th>
       {% for ym in a.months %}<th class="num"><a href="/months/{{ ym }}">{{ ym[5:] }}</a></th>{% endfor %}
+      <th>Trend</th>
       <th class="num">Avg</th>
       <th class="num">Total</th>
       <th class="num">Rows</th>
@@ -58,7 +80,8 @@
       </td>
       {% for ym in a.months %}
         {% set v = r.per_month.get(ym, 0) %}
-        <td class="num gridcell{{ ' peak' if ym == r.peak_month and r.per_month | length > 1 }}">
+        <td class="num gridcell{{ ' peak' if ym == r.peak_month and r.peak_minor > 0 }}"
+            style="--h: {{ (v / r.peak_minor) | round(3) if r.peak_minor else 0 }}">
           {%- if v -%}
             {%- set q = 'category=' ~ (r.label | urlencode) if kind == 'category'
                    else 'account=' ~ cards.get(r.label, '') if kind == 'card'
@@ -68,6 +91,7 @@
           {%- else -%}<span class="muted">·</span>{%- endif -%}
         </td>
       {% endfor %}
+      <td class="sparkcell">{{ spark(r.cells, r.peak_minor) }}</td>
       <td class="num muted">{{ r.avg | money }}</td>
       <td class="num gridtotal">{{ r.total | money }}</td>
       <td class="num muted">{{ r.n }}</td>
@@ -76,18 +100,55 @@
   </tbody>
 </table>
 </div>
+<p class="hint caption">
+  Each cell is shaded by its share of the row's own peak month, so a category's
+  hot months stand out without reading the numbers. The trend line is normalised
+  to that row's own range — its shape, not its size.
+</p>
 {% endmacro %}
 
 <h2>Spend per month</h2>
-<table>
-  <thead><tr><th>Month</th><th></th><th class="num">Spend</th><th class="num">vs average</th></tr></thead>
+
+{% set W = 760 %}{% set H = 200 %}{% set padT = 22 %}{% set padB = 26 %}
+{% set n = a.series | length %}{% set colW = W / n %}{% set barW = colW * 0.56 %}
+{% set base = H - padB %}{% set plotH = H - padT - padB %}
+{% set ymax = a.max_minor or 1 %}
+{% set avgY = padT + plotH * (1 - a.avg_minor / ymax) %}
+<div class="chartwrap">
+<svg class="colchart" viewBox="0 0 {{ W }} {{ H }}" width="100%" role="img"
+     aria-label="Net spend for each of the {{ n }} complete months, against the average.">
+  <line class="axis" x1="0" y1="{{ base }}" x2="{{ W }}" y2="{{ base }}"/>
+  <line class="avgline" x1="0" y1="{{ avgY | round(1) }}" x2="{{ W }}" y2="{{ avgY | round(1) }}"/>
+  {% for s in a.series %}
+    {% set cx = colW * loop.index0 + colW / 2 %}
+    {% set bh = plotH * s.spend / ymax %}
+    {% set by = base - bh %}
+    <a href="/months/{{ s.month }}">
+      <rect class="col{{ ' under' if s.spend < a.avg_minor }}"
+            data-tip="{{ s.month }} · {{ s.spend | money }} · {{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }} vs avg"
+            x="{{ (cx - barW / 2) | round(1) }}" y="{{ by | round(1) }}"
+            width="{{ barW | round(1) }}" height="{{ bh | round(1) }}" rx="3">
+        <title>{{ s.month }}: {{ s.spend | money }}</title>
+      </rect>
+      {% if s.spend in (a.max_minor, a.min_minor) %}
+        <text class="colval" x="{{ cx | round(1) }}" y="{{ (by - 6) | round(1) }}" text-anchor="middle">{{ s.spend | money }}</text>
+      {% endif %}
+      <text class="collabel" x="{{ cx | round(1) }}" y="{{ H - 9 }}" text-anchor="middle">{{ s.month[5:] }}</text>
+    </a>
+  {% endfor %}
+</svg>
+</div>
+<p class="hint caption">
+  Dashed line: the {{ n }}-month average, {{ a.avg_minor | money }}. Lighter
+  columns fall below it. Hover a column, or read the exact figures below.
+</p>
+
+<table class="spendtable">
+  <thead><tr><th>Month</th><th class="num">Spend</th><th class="num">vs average</th></tr></thead>
   <tbody>
   {% for s in a.series %}
     <tr>
       <td><a href="/months/{{ s.month }}"><strong>{{ s.month }}</strong></a></td>
-      <td class="barcell">
-        <span class="bar" style="width: {{ (100 * s.spend / a.max_minor) | round | int if a.max_minor > 0 else 0 }}%"></span>
-      </td>
       <td class="num">{{ s.spend | money }}</td>
       <td class="num">
         <span class="{{ 'credit' if s.spend < a.avg_minor }}">
@@ -97,7 +158,7 @@
     </tr>
   {% endfor %}
     <tr class="footrow">
-      <td>Average</td><td></td>
+      <td>Average</td>
       <td class="num">{{ a.avg_minor | money }}</td>
       <td class="num muted">{{ a.min_minor | money }} – {{ a.max_minor | money }}</td>
     </tr>
@@ -121,6 +182,26 @@
 </p>
 {{ grid(a.excluded_flows, 'flow') }}
 {% endif %}
+
+<div class="charttip" hidden></div>
+<script>
+  (function () {
+    var tip = document.querySelector('.charttip');
+    if (!tip) return;
+    document.addEventListener('pointerover', function (e) {
+      var el = e.target.closest('[data-tip]');
+      if (!el) return;
+      tip.textContent = el.getAttribute('data-tip');
+      tip.hidden = false;
+      var r = el.getBoundingClientRect();
+      tip.style.left = (window.scrollX + r.left + r.width / 2) + 'px';
+      tip.style.top = (window.scrollY + r.top - 8) + 'px';
+    });
+    document.addEventListener('pointerout', function (e) {
+      if (e.target.closest('[data-tip]')) tip.hidden = true;
+    });
+  })();
+</script>
 
 {% endif %}
 

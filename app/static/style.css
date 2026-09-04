@@ -236,9 +236,17 @@ td.actions form { display: inline; }
 /* Analytics — the month breakdowns laid out across every complete month. A
    dense numeric grid: months read left to right, the peak month in each row is
    marked, and it scrolls inside its own box rather than widening the page. */
-.gridwrap { overflow-x: auto; margin: .5rem 0 1.75rem; }
+.gridwrap { overflow-x: auto; margin: .5rem 0 .4rem; }
 table.grid { font-variant-numeric: tabular-nums; }
 table.grid th, table.grid td { padding: .4rem .55rem; white-space: nowrap; }
+table.grid td.gridcell { position: relative; text-align: right; }
+table.grid td.gridcell > * { position: relative; }
+/* The heat layer: each cell's share of its row's peak month, one accent hue,
+   kept faint so the number stays the primary thing. */
+table.grid td.gridcell::before {
+  content: ""; position: absolute; inset: 1px; border-radius: 3px;
+  background: var(--accent); opacity: calc(var(--h, 0) * 0.22);
+}
 table.grid td.gridcell a { color: inherit; text-decoration: none; }
 table.grid td.gridcell a:hover { color: var(--accent); text-decoration: underline; }
 table.grid td.peak { font-weight: 650; }
@@ -246,6 +254,41 @@ table.grid td.gridtotal { font-weight: 600; border-left: 1px solid var(--line); 
 table.grid th.num a { color: var(--muted); text-decoration: none; }
 table.grid th.num a:hover { color: var(--accent); }
 tr.footrow td { border-top: 2px solid var(--line); border-bottom: 0; font-weight: 600; }
+.caption { margin: 0 0 1.9rem; max-width: 68ch; }
+
+/* Per-row trend line: one ink stroke, no fill, normalised to the row's own
+   range — its shape, not its magnitude. The peak point is dotted in accent. */
+td.sparkcell { padding: .2rem .55rem; }
+svg.spark { display: block; }
+svg.spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.4;
+  stroke-linecap: round; stroke-linejoin: round; }
+svg.spark .pk { fill: var(--accent); }
+
+/* Spend-per-month column chart. One hue; below-average months drop to a lighter
+   fill and the dashed line carries the comparison. Time reads left to right,
+   which the horizontal bar list it replaced could not do. */
+.chartwrap { margin: .75rem 0 1rem; max-width: 760px; }
+svg.colchart { overflow: visible; }
+svg.colchart .col { fill: var(--accent); }
+svg.colchart .col.under { fill: var(--accent); opacity: .42; }
+svg.colchart a:hover .col { opacity: .8; }
+svg.colchart .axis { stroke: var(--line); stroke-width: 1; }
+svg.colchart .avgline { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
+svg.colchart .colval { fill: var(--muted); font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  stroke: var(--bg); stroke-width: 3px; paint-order: stroke; }
+svg.colchart .collabel { fill: var(--ink); font-size: 11px;
+  font-variant-numeric: tabular-nums; }
+table.spendtable { max-width: 30rem; }
+
+/* Shared hover tooltip for the chart marks. Inline JS, no library — the app's
+   stance on outbound requests (Section 7) rules a CDN out for a tooltip. */
+.charttip {
+  position: absolute; transform: translate(-50%, -100%);
+  background: var(--ink); color: var(--bg);
+  font-size: .72rem; padding: .2rem .45rem; border-radius: 5px;
+  pointer-events: none; white-space: nowrap; z-index: 50;
+}
 
 /* The bulk merchant screen. The example line is the column that makes a key
    recognizable — `bus/mrt` means nothing until you see the line it came from —
