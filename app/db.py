@@ -9,6 +9,7 @@ parser. Dates are ISO strings; a transaction date has no timezone.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections import Counter
 from decimal import Decimal
@@ -709,6 +710,64 @@ def totals_for(conn: sqlite3.Connection, statement_id: int) -> dict[str, int]:
         (statement_id,),
     ).fetchone()
     return {"debits": row["debits"], "credits": row["credits"]}
+
+
+TXN_PAGE_SIZE = 100
+
+
+def transaction_page(conn: sqlite3.Connection, *, uncategorized: bool = False,
+                     month: str | None = None, category: str | None = None,
+                     account: int | None = None, merchant: str | None = None,
+                     flow: str | None = None, page: int = 1,
+                     per_page: int = TXN_PAGE_SIZE) -> dict[str, Any]:
+    """One page of the all-transactions list, with the totals the page needs.
+
+    The filter set is Section 4's drill-through targets. Without a page limit
+    this query is a 6 ms read whose result is a multi-megabyte page — one
+    category control per row — so the list is paged, but the two totals are
+    computed over the *whole* filtered slice: `total` and `shown_minor` have to
+    match the figure a report drilled through from, not just what one page of
+    rows happens to add up to.
+    """
+    clauses, args = ["1 = 1"], []
+    if uncategorized or category == "(uncategorized)":
+        clauses.append("t.category IS NULL")
+    if month:
+        clauses.append("substr(t.txn_date, 1, 7) = ?")
+        args.append(month)
+    if category and category != "(uncategorized)":
+        clauses.append("t.category = ?")
+        args.append(category)
+    if account:
+        clauses.append("t.account_id = ?")
+        args.append(account)
+    if merchant:
+        clauses.append("t.merchant_normalized = ?")
+        args.append(merchant)
+    if flow:
+        clauses.append("t.flow_type = ?")
+        args.append(flow)
+    where = "WHERE " + " AND ".join(clauses)
+
+    total = conn.execute(f"SELECT COUNT(*) FROM txn t {where}", args).fetchone()[0]
+    shown = conn.execute(
+        f"""SELECT COALESCE(SUM(CASE WHEN t.flow_type = 'spend'  THEN t.amount_sgd_minor
+                                     WHEN t.flow_type = 'refund' THEN -t.amount_sgd_minor
+                                END), 0) AS n FROM txn t {where}""", args
+    ).fetchone()["n"]
+
+    pages = max(1, math.ceil(total / per_page))
+    page = min(max(page, 1), pages)
+    rows = conn.execute(
+        f"""SELECT t.*, a.issuer, a.last4 FROM txn t
+            JOIN account a ON a.id = t.account_id
+            {where}
+            ORDER BY t.txn_date DESC, t.id DESC
+            LIMIT ? OFFSET ?""",
+        [*args, per_page, (page - 1) * per_page],
+    ).fetchall()
+    return {"rows": rows, "total": total, "shown_minor": shown,
+            "page": page, "pages": pages, "per_page": per_page}
 
 
 def coverage(conn: sqlite3.Connection) -> dict[str, Any]:

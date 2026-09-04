@@ -1443,6 +1443,56 @@ def test_statement_sort() -> None:
           repr(set(main.SORT_FIRST_CLICK_DESC) ^ set(db.STATEMENT_ORDERS)))
 
 
+def test_transaction_page() -> None:
+    """`db.transaction_page` — the paged all-transactions list.
+
+    Two invariants: the window arithmetic (offset, last page, clamp) is right,
+    and the `total`/`shown_minor` figures are over the *whole* filtered slice,
+    not the visible page — a report drills through to this list expecting them
+    to reconcile.
+    """
+    print("\ntransaction page")
+    import sqlite3
+    import db
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    conn.execute("INSERT INTO account (id, issuer, kind) VALUES (1, 'DBS', 'credit')")
+    rows_in = []
+    for i in range(1, 251):                      # 250 spend rows of 1.00, newest first by date
+        rows_in.append((i, 1, 1, f"2026-01-{(i % 28) + 1:02d}", "SHOP", 100, "SGD", 100,
+                        "debit", "spend"))
+    rows_in.append((900, 1, 1, "2026-02-01", "REFUND", 100, "SGD", 100, "credit", "refund"))
+    conn.executemany(
+        """INSERT INTO txn (id, account_id, statement_id, txn_date, description_raw,
+                            amount_minor, currency, amount_sgd_minor, direction, flow_type)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""", rows_in)
+
+    first = db.transaction_page(conn, page=1, per_page=100)
+    check("the first page holds per_page rows", len(first["rows"]) == 100, len(first["rows"]))
+    check("total counts the whole slice, not the page", first["total"] == 251, first["total"])
+    check("pages is ceil(total / per_page)", first["pages"] == 3, first["pages"])
+    check("net spend is the whole slice: 250 spend less 1 refund",
+          first["shown_minor"] == 249 * 100, first["shown_minor"])
+
+    last = db.transaction_page(conn, page=3, per_page=100)
+    check("the last page holds the remainder", len(last["rows"]) == 51, len(last["rows"]))
+
+    over = db.transaction_page(conn, page=99, per_page=100)
+    check("a page past the end clamps to the last page", over["page"] == 3, over["page"])
+    check("clamped page still returns rows", len(over["rows"]) == 51, len(over["rows"]))
+
+    filtered = db.transaction_page(conn, flow="refund", page=1, per_page=100)
+    check("a filter narrows total and rows together",
+          filtered["total"] == 1 and len(filtered["rows"]) == 1, filtered["total"])
+    check("net spend follows the filter", filtered["shown_minor"] == -100, filtered["shown_minor"])
+
+    empty = db.transaction_page(conn, month="1999-01", page=1, per_page=100)
+    check("an empty slice is one page of nothing",
+          empty["total"] == 0 and empty["pages"] == 1 and empty["rows"] == [], repr(empty))
+
+
 def test_cli_runs() -> None:
     """Actually invoke the CLI.
 
@@ -1587,6 +1637,7 @@ if __name__ == "__main__":
     test_tier3_retries()
     test_statement_sort()
     test_row_parse_notes()
+    test_transaction_page()
     test_cli_runs()
     test_reconciliation()
     test_sanity_checks()
