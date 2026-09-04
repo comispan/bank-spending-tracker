@@ -16,6 +16,9 @@
 <ul class="warnings">
   {% for w in warnings %}<li>{{ w }}</li>{% endfor %}
 </ul>
+{% if notes %}
+<p class="hint">The rows a warning is about are flagged <span class="pnote">like this</span> in the parsed-rows table.</p>
+{% endif %}
 {% endif %}
 
 <nav class="pager">
@@ -30,7 +33,7 @@
     <h2>Parsed from page {{ page }} — {{ txns|length }} rows</h2>
     {% if txns %}
     <table class="compact">
-      <thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th>Dir</th></tr></thead>
+      <thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th>Dir</th><th>Parse</th></tr></thead>
       <tbody>
       {% for t in txns %}
         <tr>
@@ -38,6 +41,11 @@
           <td>{{ t.description_raw }}</td>
           <td class="num {{ t.direction }}">{{ t.amount_minor | money }}</td>
           <td><span class="dir {{ t.direction }}">{{ t.direction }}</span></td>
+          <td class="pnotes">
+            {%- for n in notes.get(t.id, []) -%}
+              <span class="pnote {{ n.tag }}" title="{{ n.detail }}">{{ n.tag }}</span>
+            {%- endfor -%}
+          </td>
         </tr>
       {% endfor %}
       </tbody>

@@ -137,6 +137,15 @@ table.compact td, table.compact th { padding: .35rem .5rem; font-size: .85rem; }
 
 .gap { color: var(--warn); font-size: .78rem; }
 
+/* Per-row parse notes: which rows an aggregate warning above is about. Same
+   warning colour as the .warnings box they belong to. */
+td.pnotes { white-space: nowrap; }
+.pnote {
+  display: inline-block; margin: 0 .25rem .15rem 0; padding: .05rem .4rem;
+  border-radius: 999px; font-size: .68rem; font-weight: 650; letter-spacing: .03em;
+  background: var(--warn-bg); color: var(--warn); cursor: help;
+}
+
 .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
          gap: .1rem 1.5rem; margin: 1.25rem 0; }
 .facts div { padding: .5rem 0; border-bottom: 1px solid var(--line); }

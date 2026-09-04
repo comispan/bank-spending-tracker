@@ -780,6 +780,10 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
                 "reference": reference,
                 "foreign": {"amount": foreign_amount, "currency": foreign_currency},
                 "fx_rate": fx_rate,
+                # The row carried more than one amount-shaped number, so the one
+                # taken as the transaction figure may be a running balance. Kept
+                # on the row, not just tallied, so the warning can point at it.
+                "amount_ambiguous": ambiguous,
             })
             out["_ambiguous_rows"] += int(ambiguous)
             continue

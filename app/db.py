@@ -94,7 +94,13 @@ CREATE TABLE IF NOT EXISTS txn (
     -- tells them apart, so dedup_key is built from it too.
     reference       TEXT,
     dedup_key       TEXT,
-    duplicate_of_id INTEGER REFERENCES txn(id)
+    duplicate_of_id INTEGER REFERENCES txn(id),
+    -- A parse-time note the parser can only make while it has the page in
+    -- front of it: the row carried more than one amount-shaped number, so the
+    -- figure taken as the transaction amount may be a running balance. Stored
+    -- per row rather than only counted in `warnings`, so the statement view
+    -- can mark exactly which rows the warning is about.
+    amount_ambiguous INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS txn_by_statement ON txn(statement_id);
@@ -158,6 +164,7 @@ def connect() -> sqlite3.Connection:
 MIGRATIONS: list[tuple[str, str]] = [
     ("statement", "statement_date TEXT"),
     ("txn", "reference TEXT"),
+    ("txn", "amount_ambiguous INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -261,12 +268,16 @@ def insert_transactions(conn: sqlite3.Connection, statement_id: int, account_id:
         """INSERT INTO txn (account_id, statement_id, txn_date, posted_date,
                             description_raw, merchant_normalized,
                             amount_minor, currency, amount_sgd_minor, fx_rate,
-                            direction, source_page, reference, dedup_key)
+                            direction, source_page, reference, dedup_key,
+                            amount_ambiguous)
            VALUES (:account_id, :statement_id, :txn_date, :posted_date,
                    :description_raw, :merchant_normalized,
                    :amount_minor, :currency, :amount_sgd_minor, :fx_rate,
-                   :direction, :source_page, :reference, :dedup_key)""",
-        [dict(r, account_id=account_id, statement_id=statement_id) for r in rows],
+                   :direction, :source_page, :reference, :dedup_key,
+                   :amount_ambiguous)""",
+        [dict(r, account_id=account_id, statement_id=statement_id,
+              amount_ambiguous=int(bool(r.get("amount_ambiguous"))))
+         for r in rows],
     )
 
 
@@ -339,6 +350,42 @@ def backfill_foreign_amounts(conn: sqlite3.Connection) -> int:
         """UPDATE txn SET description_raw = ?, merchant_normalized = ?,
                           amount_minor = ?, currency = ?, fx_rate = ?
            WHERE id = ?""", updates)
+    return len(updates)
+
+
+def backfill_parse_flags(conn: sqlite3.Connection) -> int:
+    """Replay the parser's per-row `amount_ambiguous` note onto stored rows.
+
+    Whether a row carried more than one amount is decided while the parser has
+    the page in front of it, and until now it survived only as a count in
+    `warnings`. This puts it back on the row, off `page_text` like the other
+    backfills and matched on `(date, amount)` within the statement. The parse
+    is deterministic, so a row the current parser no longer flags is cleared
+    too — which is what makes it safe on every boot rather than one-way.
+    """
+    updates = []
+    for stmt in conn.execute(
+        "SELECT id, page_text FROM statement WHERE page_text IS NOT NULL"
+    ):
+        pages = json.loads(stmt["page_text"] or "[]")
+        if not pages:
+            continue
+        ctx = rows.document_context(pages)
+        flag: dict[tuple[str, int | None], int] = {}
+        for page in pages:
+            for t in rows.parse_page(page, ctx.period, ctx.year, ctx.statement_date)["transactions"]:
+                # Key on the SGD figure in integer minor units, the same form
+                # the row is stored in — a Decimal string round-trip drops the
+                # trailing zero on a whole-dollar amount and would miss it.
+                flag[(t["date"], to_minor(t["amount"]))] = int(bool(t.get("amount_ambiguous")))
+        for row in conn.execute(
+            "SELECT id, txn_date, amount_sgd_minor, amount_ambiguous FROM txn WHERE statement_id = ?",
+            (stmt["id"],)
+        ):
+            want = flag.get((row["txn_date"], row["amount_sgd_minor"]))
+            if want is not None and want != row["amount_ambiguous"]:
+                updates.append((want, row["id"]))
+    conn.executemany("UPDATE txn SET amount_ambiguous = ? WHERE id = ?", updates)
     return len(updates)
 
 
