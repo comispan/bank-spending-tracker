@@ -20,6 +20,7 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, Request, UploadFile
@@ -153,16 +154,34 @@ def index(request: Request, error: str | None = None, notice: str | None = None,
     )
 
 
-@app.post("/upload")
-async def upload(file: UploadFile, password: str = Form("")):
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        return RedirectResponse("/?error=Only+PDF+files+can+be+uploaded", status_code=303)
+class Ingested(NamedTuple):
+    """The outcome of trying to file one uploaded PDF.
 
-    payload = await file.read()
+    `kind` is one of "stored", "duplicate", "rejected". `statement_id` is set
+    for "stored" and "duplicate" (the existing row, in that case). `message` is
+    a human phrase already prefixed with the filename, ready to drop into a
+    notice or an error line.
+    """
+    kind: str
+    statement_id: int | None
+    message: str
+
+
+def ingest_statement(payload: bytes, filename: str, password: str | None) -> Ingested:
+    """Validate, parse and file one statement PDF — the shared body of both
+    upload routes.
+
+    Nothing is written to disk or the database until the file parses, so a
+    reject leaves no orphan. The single-file and bulk routes differ only in how
+    they surface the `Ingested` this returns.
+    """
+    name = filename or "file"
+    if not filename or not filename.lower().endswith(".pdf"):
+        return Ingested("rejected", None, f"{name}: only PDF files can be uploaded")
     if not payload:
-        return RedirectResponse("/?error=That+file+was+empty", status_code=303)
+        return Ingested("rejected", None, f"{name}: that file was empty")
     if len(payload) > MAX_UPLOAD_BYTES:
-        return RedirectResponse("/?error=That+file+is+over+25MB", status_code=303)
+        return Ingested("rejected", None, f"{name}: over 25MB")
 
     digest = parsing.sha256(payload)
     with db.connect() as conn:
@@ -170,23 +189,20 @@ async def upload(file: UploadFile, password: str = Form("")):
     if existing:
         # The cheapest duplicate to catch, and the most common one: the same
         # file uploaded twice. Caught before parsing rather than after.
-        return RedirectResponse(
-            f"/statements/{existing['id']}?notice=Already+uploaded+"
-            f"{existing['filename'].replace(' ', '+')}", status_code=303)
+        return Ingested("duplicate", existing["id"],
+                        f"{name}: already uploaded as {existing['filename']}")
 
-    # Parse from a temp copy. Nothing is stored until it parses, so a file that
-    # cannot be read doesn't leave an orphan in the statements directory.
     tmp_dir = Path(tempfile.mkdtemp())
     tmp = tmp_dir / "upload.pdf"
     tmp.write_bytes(payload)
     try:
-        result = parsing.parse(tmp, file.filename, password or None)
+        result = parsing.parse(tmp, filename, password or None)
     finally:
         tmp.unlink(missing_ok=True)
         tmp_dir.rmdir()
 
     if result.error:
-        return RedirectResponse(f"/?error={result.error.replace(' ', '+')}", status_code=303)
+        return Ingested("rejected", None, f"{name}: {result.error}")
 
     stored = db.STATEMENT_DIR / f"{digest[:16]}.pdf"
     stored.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +213,7 @@ async def upload(file: UploadFile, password: str = Form("")):
         account_id = db.find_or_create_account(
             conn, result.issuer, stmt.get("account_last4"), stmt.get("currency") or "SGD")
         statement_id = db.insert_statement(conn, account_id, {
-            "filename": file.filename,
+            "filename": filename,
             "file_sha256": digest,
             "storage_path": str(stored),
             "period_start": stmt.get("statement_period_start"),
@@ -258,7 +274,56 @@ async def upload(file: UploadFile, password: str = Form("")):
         db.recategorize_all(conn)
         conn.commit()
 
-    return RedirectResponse(f"/statements/{statement_id}", status_code=303)
+    return Ingested("stored", statement_id, f"{name}: filed")
+
+
+@app.post("/upload")
+async def upload(file: UploadFile, password: str = Form("")):
+    payload = await file.read()
+    out = ingest_statement(payload, file.filename or "", password or None)
+    if out.kind == "duplicate":
+        return RedirectResponse(
+            f"/statements/{out.statement_id}?notice=Already+uploaded+"
+            f"{(file.filename or '').replace(' ', '+')}", status_code=303)
+    if out.kind == "rejected":
+        return redirect("/", error=out.message)
+    return RedirectResponse(f"/statements/{out.statement_id}", status_code=303)
+
+
+@app.post("/upload-bulk")
+async def upload_bulk(files: list[UploadFile]):
+    """File a whole folder of statements in one go (Section 8).
+
+    No password field: a bulk run cannot stop to prompt for each locked file,
+    so any encrypted PDF is reported as rejected and the rest still go through.
+    Decrypt those first and upload them singly. Every file is processed
+    independently — one bad PDF never blocks the others — and the redirect
+    carries a per-file summary so a silent partial success is impossible.
+    """
+    stored, duplicate, failures = [], 0, []
+    for f in files:
+        payload = await f.read()
+        out = ingest_statement(payload, f.filename or "", None)
+        if out.kind == "stored":
+            stored.append(out.statement_id)
+        elif out.kind == "duplicate":
+            duplicate += 1
+        else:
+            failures.append(out.message)
+
+    if not files or (not stored and not duplicate and not failures):
+        return redirect("/", error="No files were selected")
+
+    parts = []
+    if stored:
+        parts.append(f"{len(stored)} statement(s) filed")
+    if duplicate:
+        parts.append(f"{duplicate} already on file, skipped")
+    notice = ", ".join(parts) if parts else None
+    error = None
+    if failures:
+        error = f"{len(failures)} file(s) not filed — " + "; ".join(failures)
+    return redirect("/", notice=notice, error=error)
 
 
 @app.get("/statements/{statement_id}", response_class=HTMLResponse)
