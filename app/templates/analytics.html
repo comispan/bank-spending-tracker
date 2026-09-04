@@ -30,6 +30,49 @@
   {% endif %}
 </p>
 
+{% set hi = a.series | max(attribute='spend') %}
+{% set lo = a.series | min(attribute='spend') %}
+<dl class="facts">
+  <div><dt>Months compared</dt><dd class="num">{{ a.months | length }}</dd></div>
+  <div><dt>Average month</dt><dd class="num">{{ a.avg_minor | money }}</dd></div>
+  <div><dt>Highest</dt><dd class="num">{{ hi.spend | money }} <span class="muted">{{ hi.month }}</span></dd></div>
+  <div><dt>Lowest</dt><dd class="num">{{ lo.spend | money }} <span class="muted">{{ lo.month }}</span></dd></div>
+</dl>
+
+{# ---------- the label cell every table shares: same link, same look --------- #}
+{% macro label(r, kind) %}
+  {%- if kind == 'card' and cards.get(r.label) -%}
+    <a href="/transactions?account={{ cards[r.label] }}">{{ r.label }}</a>
+  {%- elif kind == 'merchant' -%}
+    <a href="/transactions?merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a>
+  {%- elif kind == 'category' -%}
+    <a href="/transactions?category={{ r.label | urlencode }}">{{ r.label }}</a>
+  {%- elif kind == 'flow' -%}
+    <a href="/transactions?flow={{ r.label | urlencode }}"><span class="flowtag {{ r.label }}">{{ r.label }}</span></a>
+  {%- else -%}{{ r.label }}{%- endif -%}
+{% endmacro %}
+
+{# ---------- the simple view: one bar per row, same as the month page -------- #}
+{% macro bars(rows, kind) %}
+{% set biggest = rows[0].total if rows else 0 %}
+<table class="sumbars">
+  <thead><tr><th>{{ kind | capitalize }}</th><th></th><th class="num">Avg / month</th><th class="num">Total</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ label(r, kind) }}</td>
+      <td class="barcell">
+        <span class="bar{{ ' unknown' if r.label == '(uncategorized)' }}"
+              style="width: {{ (100 * r.total / biggest) | round | int if biggest > 0 and r.total > 0 else 0 }}%"></span>
+      </td>
+      <td class="num">{{ r.avg | money }}</td>
+      <td class="num muted">{{ r.total | money }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endmacro %}
+
 {# ---------- a 7-point sparkline, normalised to the row's own range ---------- #}
 {% macro spark(cells, peak) %}
   {%- set w = 104 -%}{%- set h = 24 -%}
@@ -67,17 +110,7 @@
   <tbody>
   {% for r in rows %}
     <tr>
-      <td>
-        {%- if kind == 'card' and cards.get(r.label) -%}
-          <a href="/transactions?account={{ cards[r.label] }}">{{ r.label }}</a>
-        {%- elif kind == 'merchant' -%}
-          <a href="/transactions?merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a>
-        {%- elif kind == 'category' -%}
-          <a href="/transactions?category={{ r.label | urlencode }}">{{ r.label }}</a>
-        {%- elif kind == 'flow' -%}
-          <a href="/transactions?flow={{ r.label | urlencode }}"><span class="flowtag {{ r.label }}">{{ r.label }}</span></a>
-        {%- else -%}{{ r.label }}{%- endif -%}
-      </td>
+      <td>{{ label(r, kind) }}</td>
       {% for ym in a.months %}
         {% set v = r.per_month.get(ym, 0) %}
         <td class="num gridcell{{ ' peak' if ym == r.peak_month and r.peak_minor > 0 }}"
@@ -101,9 +134,8 @@
 </table>
 </div>
 <p class="hint caption">
-  Each cell is shaded by its share of the row's own peak month, so a category's
-  hot months stand out without reading the numbers. The trend line is normalised
-  to that row's own range — its shape, not its size.
+  Darker cells are that row's bigger months; the bold one is its peak. The
+  trend line shows each row's shape across the months.
 </p>
 {% endmacro %}
 
@@ -140,39 +172,55 @@
 </div>
 <p class="hint caption">
   Dashed line: the {{ n }}-month average, {{ a.avg_minor | money }}. Lighter
-  columns fall below it. Hover a column, or read the exact figures below.
+  columns fall below it. Hover a column for its figures, or click one to open
+  that month.
 </p>
 
-<table class="spendtable">
-  <thead><tr><th>Month</th><th class="num">Spend</th><th class="num">vs average</th></tr></thead>
-  <tbody>
-  {% for s in a.series %}
-    <tr>
-      <td><a href="/months/{{ s.month }}"><strong>{{ s.month }}</strong></a></td>
-      <td class="num">{{ s.spend | money }}</td>
-      <td class="num">
-        <span class="{{ 'credit' if s.spend < a.avg_minor }}">
-          {{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }}
-        </span>
-      </td>
-    </tr>
-  {% endfor %}
-    <tr class="footrow">
-      <td>Average</td>
-      <td class="num">{{ a.avg_minor | money }}</td>
-      <td class="num muted">{{ a.min_minor | money }} – {{ a.max_minor | money }}</td>
-    </tr>
-  </tbody>
-</table>
+<details class="monthly">
+  <summary>Exact figures</summary>
+  <table class="spendtable">
+    <thead><tr><th>Month</th><th class="num">Spend</th><th class="num">vs average</th></tr></thead>
+    <tbody>
+    {% for s in a.series %}
+      <tr>
+        <td><a href="/months/{{ s.month }}"><strong>{{ s.month }}</strong></a></td>
+        <td class="num">{{ s.spend | money }}</td>
+        <td class="num">
+          <span class="{{ 'credit' if s.spend < a.avg_minor }}">
+            {{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }}
+          </span>
+        </td>
+      </tr>
+    {% endfor %}
+      <tr class="footrow">
+        <td>Average</td>
+        <td class="num">{{ a.avg_minor | money }}</td>
+        <td class="num muted">{{ a.min_minor | money }} – {{ a.max_minor | money }}</td>
+      </tr>
+    </tbody>
+  </table>
+</details>
 
 <h2>By category</h2>
-{{ grid(a.by_category, 'category') }}
+{{ bars(a.by_category, 'category') }}
+<details class="monthly">
+  <summary>Month by month</summary>
+  {{ grid(a.by_category, 'category') }}
+</details>
 
 <h2>By card</h2>
-{{ grid(a.by_card, 'card') }}
+{{ bars(a.by_card, 'card') }}
+<details class="monthly">
+  <summary>Month by month</summary>
+  {{ grid(a.by_card, 'card') }}
+</details>
 
 <h2>Top merchants</h2>
-{{ grid(a.by_merchant, 'merchant') }}
+{{ bars(a.by_merchant, 'merchant') }}
+<details class="monthly">
+  <summary>Month by month</summary>
+  {{ grid(a.by_merchant, 'merchant') }}
+</details>
 
 {% if a.excluded_flows %}
 <h2>Not counted as spending</h2>
@@ -180,7 +228,11 @@
   Card payments, transfers, fees and income, at their gross amount — held out
   of every figure above for the same reason the month page holds them out.
 </p>
-{{ grid(a.excluded_flows, 'flow') }}
+{{ bars(a.excluded_flows, 'flow') }}
+<details class="monthly">
+  <summary>Month by month</summary>
+  {{ grid(a.excluded_flows, 'flow') }}
+</details>
 {% endif %}
 
 <div class="charttip" hidden></div>

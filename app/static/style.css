@@ -281,6 +281,17 @@ svg.colchart .collabel { fill: var(--ink); font-size: 11px;
   font-variant-numeric: tabular-nums; }
 table.spendtable { max-width: 30rem; }
 
+/* The simple view leads each section; the month-by-month grid folds away
+   behind a native <details>, so the default read is bars anyone can take in
+   and the dense numbers are one click, not the wall you land on. */
+details.monthly { margin: .4rem 0 2rem; }
+details.monthly summary {
+  cursor: pointer; color: var(--accent); font-size: .85rem; width: max-content;
+}
+details.monthly summary:hover { text-decoration: underline; }
+details.monthly[open] summary { margin-bottom: .3rem; }
+table.sumbars .barcell { width: 34%; }
+
 /* Shared hover tooltip for the chart marks. Inline JS, no library — the app's
    stance on outbound requests (Section 7) rules a CDN out for a tooltip. */
 .charttip {
