@@ -146,14 +146,21 @@
 
 <h2>Spend per month</h2>
 
-{% set W = 760 %}{% set H = 200 %}{% set padT = 22 %}{% set padB = 26 %}
+{% set W = 760 %}{% set H = 214 %}{% set padT = 22 %}{% set padB = 40 %}
 {% set n = a.series | length %}{% set colW = W / n %}{% set barW = colW * 0.56 %}
 {% set base = H - padB %}{% set plotH = H - padT - padB %}
 {% set ymax = a.max_minor or 1 %}
 {% set avgY = padT + plotH * (1 - a.avg_minor / ymax) %}
+{# Every column carries its own figure, so the labels have to sit side by side
+   without touching. Past about fourteen months the cents are what overflows
+   first, and they are the least of what the number says, so they go; past about
+   twenty the type has to come down with them. That holds to roughly thirty
+   columns, beyond which a run this long wants a different chart, not a smaller
+   font. #}
+{% set cents = colW >= 56 %}{% set tight = colW < 38 %}
 <div class="chartwrap">
 <svg class="colchart" viewBox="0 0 {{ W }} {{ H }}" width="100%" role="img"
-     aria-label="Net spend for each of the {{ n }} complete months, against the average.">
+     aria-label="Net spend for each of the {{ n }} complete months from {{ a.series[0].month }} to {{ a.series[-1].month }}, against the average.">
   <line class="axis" x1="0" y1="{{ base }}" x2="{{ W }}" y2="{{ base }}"/>
   <line class="avgline" x1="0" y1="{{ avgY | round(1) }}" x2="{{ W }}" y2="{{ avgY | round(1) }}"/>
   {% for s in a.series %}
@@ -161,24 +168,28 @@
     {% set bh = plotH * s.spend / ymax %}
     {% set by = base - bh %}
     <a href="/months/{{ s.month }}">
+      {# The hover readout says only what the column cannot: the gap against the
+         average. The month is on the axis and the figure is over the bar. #}
       <rect class="col{{ ' under' if s.spend < a.avg_minor }}"
-            data-tip="{{ s.month }} · {{ s.spend | money }} · {{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }} vs avg"
+            data-tip="{{ s.spend | money }}&#10;{{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }} vs average"
             x="{{ (cx - barW / 2) | round(1) }}" y="{{ by | round(1) }}"
-            width="{{ barW | round(1) }}" height="{{ bh | round(1) }}" rx="3">
-        <title>{{ s.month }}: {{ s.spend | money }}</title>
-      </rect>
-      {% if s.spend in (a.max_minor, a.min_minor) %}
-        <text class="colval" x="{{ cx | round(1) }}" y="{{ (by - 6) | round(1) }}" text-anchor="middle">{{ s.spend | money }}</text>
+            width="{{ barW | round(1) }}" height="{{ bh | round(1) }}" rx="3"/>
+      <text class="colval{{ ' tight' if tight }}" x="{{ cx | round(1) }}" y="{{ (by - 6) | round(1) }}" text-anchor="middle">{{ (s.spend | money) if cents else (s.spend | money0) }}</text>
+      <text class="collabel" x="{{ cx | round(1) }}" y="{{ (base + 17) | round(1) }}" text-anchor="middle">{{ s.month[5:] }}</text>
+      {# The year, once, wherever it turns over. Without it a run longer than
+         twelve months shows two columns labelled 01 and no way to tell them
+         apart, now that the readout no longer spells the month out. #}
+      {% if loop.first or s.month[:4] != loop.previtem.month[:4] %}
+        <text class="colyear" x="{{ cx | round(1) }}" y="{{ (base + 30) | round(1) }}" text-anchor="middle">{{ s.month[:4] }}</text>
       {% endif %}
-      <text class="collabel" x="{{ cx | round(1) }}" y="{{ H - 9 }}" text-anchor="middle">{{ s.month[5:] }}</text>
     </a>
   {% endfor %}
 </svg>
 </div>
 <p class="hint caption">
   Dashed line: the {{ n }}-month average, {{ a.avg_minor | money }}. Lighter
-  columns fall below it. Hover a column for its figures, or click one to open
-  that month.
+  columns fall below it. Hover a column for its gap against that average, or
+  click one to open that month.
 </p>
 
 <details class="monthly">
