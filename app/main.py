@@ -78,6 +78,14 @@ def money(minor: int | None) -> str:
     return f"{minor / 100:,.2f}"
 
 
+def money0(minor: int | None) -> str:
+    """Whole dollars. For chart labels packed side by side, where the cents are
+    the first thing to overflow and the least of what the figure says."""
+    if minor is None:
+        return "—"
+    return f"{minor / 100:,.0f}"
+
+
 def period(s) -> str:
     """What the statement covers, in descending order of how much we know.
 
@@ -116,6 +124,7 @@ def asset_version(name: str) -> str:
 
 
 templates.env.filters["money"] = money
+templates.env.filters["money0"] = money0
 templates.env.filters["period"] = period
 templates.env.globals["asset_version"] = asset_version
 

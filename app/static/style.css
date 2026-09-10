@@ -299,8 +299,11 @@ svg.colchart .avgline { stroke: var(--muted); stroke-width: 1; stroke-dasharray:
 svg.colchart .colval { fill: var(--muted); font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   stroke: var(--bg); stroke-width: 3px; paint-order: stroke; }
+svg.colchart .colval.tight { font-size: 9px; stroke-width: 2.5px; }
 svg.colchart .collabel { fill: var(--ink); font-size: 11px;
   font-variant-numeric: tabular-nums; }
+svg.colchart .colyear { fill: var(--muted); font-size: 9.5px;
+  font-variant-numeric: tabular-nums; letter-spacing: .04em; }
 table.spendtable { max-width: 30rem; }
 
 /* Card coverage timeline on /months. One axis for every card: the table it
@@ -339,8 +342,11 @@ table.sumbars .barcell { width: 34%; }
 .charttip {
   position: absolute; transform: translate(-50%, -100%);
   background: var(--ink); color: var(--bg);
-  font-size: .72rem; padding: .2rem .45rem; border-radius: 5px;
-  pointer-events: none; white-space: nowrap; z-index: 50;
+  font-size: .72rem; padding: .25rem .5rem; border-radius: 5px;
+  pointer-events: none; z-index: 50;
+  /* `pre` rather than `nowrap`: a tip breaks its own lines and no others, so a
+     two-line readout stays two lines and a one-line one still cannot wrap. */
+  white-space: pre; text-align: center; line-height: 1.4;
 }
 
 /* The bulk merchant screen. The example line is the column that makes a key
