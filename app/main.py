@@ -96,8 +96,28 @@ def period(s) -> str:
     return "—"
 
 
+def asset_version(name: str) -> str:
+    """A cache-busting token for a file in /static — its own mtime.
+
+    Browsers cache the stylesheet hard, so a CSS change does not reach a tab
+    that already has the old one: the page comes back with new markup and the
+    previous rules, which looks like a bug in the change rather than a stale
+    file. The mtime moves exactly when the file does, so the URL changes only
+    when it must and the cache still does its job the rest of the time.
+
+    Read per render rather than at import: `--reload` watches Python, not CSS,
+    so a token fixed at startup would go stale the moment the file it names
+    changes. One `stat` on a page render is not a cost worth engineering away.
+    """
+    try:
+        return str(int((HERE / "static" / name).stat().st_mtime))
+    except OSError:
+        return "0"
+
+
 templates.env.filters["money"] = money
 templates.env.filters["period"] = period
+templates.env.globals["asset_version"] = asset_version
 
 
 # ------------------------------------------------------------------- views
