@@ -58,8 +58,8 @@ Read the three numbers in this order:
   answering your single most common category already scores 53% on this set.
 
 Nothing leaves the machine without `--gemini` or `--anthropic`, and even then
-only merchant names — no amounts, dates, balances or card numbers. Pin
-`-instruct` tags for
+only merchant names plus one example statement line each — no amounts, dates,
+balances or card numbers. Pin `-instruct` tags for
 local models; a bare tag is often the thinking build, which narrates into the
 response and breaks the format contract before the categories are looked at.
 

@@ -43,8 +43,9 @@ thinking build, which narrates into the response and breaks the format contract
 before the categories are even looked at.
 
 Nothing leaves this machine unless you pass `--gemini` or `--anthropic`, and
-even then only the merchant names — no amounts, dates, balances or card numbers,
-exactly as Sections 3 and 7 promise. The script prints what it is about to send.
+even then only the merchant names plus one example statement line each — no
+amounts, dates, balances or card numbers, exactly as Sections 3 and 7 promise.
+The script prints what it is about to send.
 
 `--grounding` adds Google Search to the Gemini run, which is the one option here
 that widens *where* the names go rather than which model reads them: they become
@@ -95,9 +96,29 @@ def ground_truth() -> dict[str, str]:
     return {r["k"]: r["c"] for r in rows}
 
 
+def examples_for(keys: list[str]) -> dict[str, str]:
+    """One statement line per merchant, the same field `/merchants` sends.
+
+    Grades the prompt tier 3 actually ships (Section 9.4, 2026-09-05): a
+    merchant name alone and a name with one example line are different inputs,
+    and scoring the former while shipping the latter would be exactly the drift
+    this file exists to prevent.
+    """
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        f"""SELECT merchant_normalized k, MAX(description_raw) e FROM txn
+            WHERE merchant_normalized IN ({','.join('?' * len(keys))})
+            GROUP BY merchant_normalized""", keys
+    ).fetchall()
+    conn.close()
+    return {r["k"]: r["e"] for r in rows}
+
+
 # ------------------------------------------------------------------ backends
 
-def ask_ollama(model: str, keys: list[str], host: str, loose: bool) -> str:
+def ask_ollama(model: str, keys: list[str], examples: dict[str, str],
+               host: str, loose: bool) -> str:
     payload = {
         "model": model,
         "stream": False,
@@ -105,7 +126,7 @@ def ask_ollama(model: str, keys: list[str], host: str, loose: bool) -> str:
         "options": {"temperature": 0},
         "messages": [
             {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": "\n".join(keys)},
+            {"role": "user", "content": tier3.prompt_payload(keys, examples)},
         ],
     }
     req = urllib.request.Request(
@@ -122,7 +143,8 @@ def ask_ollama(model: str, keys: list[str], host: str, loose: bool) -> str:
     return body.get("message", {}).get("content", "")
 
 
-def ask_anthropic(model: str, keys: list[str], effort: str | None) -> str:
+def ask_anthropic(model: str, keys: list[str], examples: dict[str, str],
+                  effort: str | None) -> str:
     try:
         import anthropic
     except ImportError:
@@ -138,7 +160,7 @@ def ask_anthropic(model: str, keys: list[str], effort: str | None) -> str:
             model=model,
             max_tokens=8000,
             system=SYSTEM,
-            messages=[{"role": "user", "content": "\n".join(keys)}],
+            messages=[{"role": "user", "content": tier3.prompt_payload(keys, examples)}],
             output_config=output_config,
         )
     except anthropic.AuthenticationError:
@@ -152,7 +174,8 @@ def ask_anthropic(model: str, keys: list[str], effort: str | None) -> str:
     return next((b.text for b in resp.content if b.type == "text"), "")
 
 
-def ask_gemini(model: str, keys: list[str], grounding: bool) -> str:
+def ask_gemini(model: str, keys: list[str], examples: dict[str, str],
+               grounding: bool) -> str:
     """Straight through the shipping client, so this grades the real thing.
 
     Including its failure modes: a bad model id or a rejected schema arrives
@@ -162,7 +185,7 @@ def ask_gemini(model: str, keys: list[str], grounding: bool) -> str:
     say today.
     """
     try:
-        return tier3.ask_gemini(keys, model=model, grounding=grounding)
+        return tier3.ask_gemini(keys, model=model, grounding=grounding, examples=examples)
     except tier3.Tier3Error as e:
         sys.exit(str(e))
 
@@ -253,6 +276,7 @@ def main() -> int:
     if args.limit:
         truth = dict(list(truth.items())[:args.limit])
     keys = list(truth)
+    examples = examples_for(keys)
 
     print(f"eval set: {len(keys)} merchants you categorized by hand")
     print(f"categories in play: {len(set(truth.values()))} of {len(CATEGORIES)}")
@@ -272,25 +296,26 @@ def main() -> int:
     if args.model == "baseline":
         return 0
 
+    with_examples = sum(1 for k in keys if examples.get(k))
     if args.gemini:
         print(f"\n  Sending {len(keys)} merchant names to the Gemini API "
-              f"({args.model}).")
+              f"({args.model}), {with_examples} with one example line each.")
         print("  No amounts, dates, balances or card numbers are included.")
         if args.grounding:
             # Said plainly and separately, because it is a different promise
-            # from the one the line above makes: the names reach Google Search,
-            # not only the model.
-            print("  Google Search is ON: these names are also sent to Google as "
-                  "search queries.")
-        raw_fn = lambda: ask_gemini(args.model, keys, args.grounding)  # noqa: E731
+            # from the one the line above makes: the model can turn any of the
+            # above into a Google Search query of its own choosing.
+            print("  Google Search is ON: the model can turn what it was given "
+                  "into search queries, not just read it.")
+        raw_fn = lambda: ask_gemini(args.model, keys, examples, args.grounding)  # noqa: E731
     elif args.anthropic:
         print(f"\n  Sending {len(keys)} merchant names to the Anthropic API "
-              f"({args.model}).")
+              f"({args.model}), {with_examples} with one example line each.")
         print("  No amounts, dates, balances or card numbers are included.")
-        raw_fn = lambda: ask_anthropic(args.model, keys, args.effort)  # noqa: E731
+        raw_fn = lambda: ask_anthropic(args.model, keys, examples, args.effort)  # noqa: E731
     else:
         print(f"\n  Asking {args.model} locally at {args.host}. Nothing leaves this machine.")
-        raw_fn = lambda: ask_ollama(args.model, keys, args.host, args.loose)  # noqa: E731
+        raw_fn = lambda: ask_ollama(args.model, keys, examples, args.host, args.loose)  # noqa: E731
 
     started = time.time()
     raw = raw_fn()

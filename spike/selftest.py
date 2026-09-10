@@ -1240,9 +1240,19 @@ def test_tier3_client() -> None:
     check("a response with no output is empty rather than an exception",
           tier3._output_text({}) == "")
 
-    # What actually leaves the machine: merchant keys, one per line, nothing else.
+    # What actually leaves the machine: merchant keys, one per line, nothing else
+    # — until a caller supplies example lines, which is opt-in per call.
     payload = tier3.prompt_payload(["grab", "fairprice"])
-    check("only merchant names are sent", payload == "grab\nfairprice", repr(payload))
+    check("only merchant names are sent when no examples are given",
+          payload == "grab\nfairprice", repr(payload))
+
+    with_examples = tier3.prompt_payload(
+        ["grab", "fairprice"], {"grab": "GRAB* A1B2C3 SINGAPORE SG"})
+    check("a supplied example rides under its merchant",
+          with_examples == "grab\n  example: GRAB* A1B2C3 SINGAPORE SG\nfairprice",
+          repr(with_examples))
+    check("a merchant with no example is still sent, just bare",
+          "fairprice" in with_examples.splitlines(), repr(with_examples))
 
     # Batch behaviour, with the network stubbed out. The stub answers the first
     # chunk properly and drops a merchant from the second, which is the failure
@@ -1251,10 +1261,12 @@ def test_tier3_client() -> None:
     keys = [f"m{i}" for i in range(tier3.BATCH_SIZE + 3)]
     calls: list[list[str]] = []
     grounded: list[bool] = []
+    seen_examples: list[dict[str, str] | None] = []
 
-    def fake_ask(chunk, model=None, key=None, thinking="low", grounding=False):
+    def fake_ask(chunk, model=None, key=None, thinking="low", grounding=False, examples=None):
         calls.append(list(chunk))
         grounded.append(grounding)
+        seen_examples.append(examples)
         pairs = [(m, "Dining") for m in chunk]
         if len(calls) == 2:
             pairs = pairs[:-1]          # a merchant silently dropped
@@ -1289,9 +1301,23 @@ def test_tier3_client() -> None:
     check("grounding is off unless it is asked for", grounded == [False, False],
           repr(grounded))
     check("...and the result says so", result["grounding"] is False)
+    check("classify() passes examples straight through to the client",
+          seen_examples == [None, None], repr(seen_examples))
 
     calls.clear()
     grounded.clear()
+    seen_examples.clear()
+    real_ask, tier3.ask_gemini = tier3.ask_gemini, fake_ask
+    try:
+        tier3.classify(["grab"], key="test", examples={"grab": "GRAB* A1 SG"})
+    finally:
+        tier3.ask_gemini = real_ask
+    check("a supplied examples dict reaches ask_gemini unchanged",
+          seen_examples == [{"grab": "GRAB* A1 SG"}], repr(seen_examples))
+
+    calls.clear()
+    grounded.clear()
+    seen_examples.clear()
     real_ask, tier3.ask_gemini = tier3.ask_gemini, fake_ask
     try:
         forced = tier3.classify(["grab"], key="test", grounding=True)

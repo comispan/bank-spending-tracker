@@ -3,10 +3,12 @@
 DESIGN.md Section 3 leaves this as the last tier and Section 9.4 as the only
 question in the app about anything leaving the machine. Both are settled here,
 and narrowly: what goes out is a **list of normalized merchant names** —
-`grab`, `fairprice`, `netflix` — and nothing else. No amounts, no dates, no
-balances, no card numbers, no statement text, no account identifiers. The
-payload is built in `prompt_payload()` below and the UI shows it verbatim
-before anything is sent.
+`grab`, `fairprice`, `netflix` — each paired with one example description line
+from a statement it was billed on, since that is often the only thing that
+makes an opaque name identifiable. Still no amounts, no dates, no balances, no
+card numbers, no account identifiers — those are separate columns the parser
+already split off, never part of `description_raw`. The payload is built in
+`prompt_payload()` below and the UI shows it verbatim before anything is sent.
 
 **This module is what the eval grades.** `spike/eval_categories.py` imports the
 prompt, the schema and the gate from right here rather than keeping its own
@@ -74,11 +76,14 @@ MAX_TOTAL_WAIT_SECONDS = 75
 # ------------------------------------------------------------------ grounding
 #
 # Off by default and behind a flag rather than simply on, because it changes
-# what the Section 9.4 disclosure has to say. Without it the merchant names are
-# read by one model; with it they are also issued as Google Search queries.
-# Still names only — no amounts, dates, balances or statement text — but "sent
-# to a model" and "typed into a search engine" are two different promises, and
-# the screen only ever asked for the first.
+# what the Section 9.4 disclosure has to say. Without it the merchant names and
+# their example lines are read by one model; with it the model can also turn
+# either into Google Search queries of its own choosing — the tool call is the
+# model's decision, not a separate request this code makes, so nothing in the
+# input can be promised to stay out of a query. Still no amounts, dates,
+# balances or card numbers either way, but "sent to a model" and "typed into a
+# search engine" are two different promises, and the screen only ever asked
+# for the first.
 #
 # What it buys is the abstention this tier is built to produce. `kintsugi pte.
 # ltd` is a restaurant group; nothing in that string says so, and no amount of
@@ -102,7 +107,10 @@ GROUNDING_TOOL = [{"type": "google_search"}]
 SYSTEM = f"""You categorize merchants for a personal spending tracker used in Singapore.
 
 You are given normalized merchant names taken from credit card and bank
-statements. Assign each one exactly one category from this list:
+statements, each one usually followed by one example description line from a
+statement it was billed on — use it for context on names that say nothing on
+their own, but categorize the merchant, not the specific line. Assign each one
+exactly one category from this list:
 
 {chr(10).join('- ' + c for c in CATEGORIES)}
 
@@ -223,14 +231,27 @@ def grounding_enabled() -> bool:
 
 # --------------------------------------------------------------- the payload
 
-def prompt_payload(keys: list[str]) -> str:
+def prompt_payload(keys: list[str], examples: dict[str, str] | None = None) -> str:
     """Exactly what would be sent, for the screen that asks permission to send it.
 
     Section 9.4 is a disclosure question, and a disclosure the user cannot
     check is not one. This returns the literal user-turn content so the UI can
     print it rather than describe it.
+
+    `examples` is optional and keyed by merchant, so a caller with nothing to
+    add (the tests, mainly) gets the plain one-name-per-line payload back
+    unchanged. A merchant with no example of its own (or none supplied) is
+    still sent, just without a line under it.
     """
-    return "\n".join(keys)
+    if not examples:
+        return "\n".join(keys)
+    lines = []
+    for k in keys:
+        lines.append(k)
+        example = examples.get(k)
+        if example:
+            lines.append(f"  example: {example}")
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------ backend
@@ -280,7 +301,8 @@ def retry_delay(error: urllib.error.HTTPError, attempt: int) -> float:
 
 def ask_gemini(keys: list[str], model: str | None = None,
                key: str | None = None, thinking: str = "low",
-               grounding: bool | None = None) -> str:
+               grounding: bool | None = None,
+               examples: dict[str, str] | None = None) -> str:
     """One batch out to Gemini, raw response text back. No parsing, no writing.
 
     Temperature is deliberately left at the model default: Google's guidance for
@@ -301,7 +323,7 @@ def ask_gemini(keys: list[str], model: str | None = None,
     payload = {
         "model": model or model_name(),
         "system_instruction": system_prompt(grounding),
-        "input": prompt_payload(keys),
+        "input": prompt_payload(keys, examples),
         "generation_config": {"thinking_level": thinking},
         "response_format": {
             "type": "text",
@@ -427,7 +449,8 @@ def gate(raw: str, asked: list[str]) -> tuple[bool, list[str], dict[str, str]]:
 
 def classify(keys: list[str], model: str | None = None,
              key: str | None = None,
-             grounding: bool | None = None) -> dict[str, object]:
+             grounding: bool | None = None,
+             examples: dict[str, str] | None = None) -> dict[str, object]:
     """Categorize unknown merchants, one chunk at a time.
 
     Returns what happened rather than raising, because a partial result is
@@ -438,6 +461,9 @@ def classify(keys: list[str], model: str | None = None,
     Abstentions are dropped here rather than downstream: `unknown` means the
     model declined, and the only correct thing to store for a declined merchant
     is nothing at all.
+
+    `examples` is the whole keyed-by-merchant map regardless of chunking —
+    each chunk's call just looks up the names it was given.
     """
     keys = [k for k in keys if k]
     chunks = [keys[i:i + BATCH_SIZE] for i in range(0, len(keys), BATCH_SIZE)]
@@ -450,7 +476,8 @@ def classify(keys: list[str], model: str | None = None,
 
     for chunk in chunks:
         try:
-            raw = ask_gemini(chunk, model=model, key=key, grounding=grounding)
+            raw = ask_gemini(chunk, model=model, key=key, grounding=grounding,
+                              examples=examples)
         except Tier3Error as e:
             problems.append(str(e))
             continue
