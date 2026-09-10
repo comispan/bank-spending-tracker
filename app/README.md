@@ -20,6 +20,7 @@ the uploaded PDFs — and is gitignored.
 | `rows.py` | The parser. Moved here from the Phase 0 spike unchanged; it is the one component proven against real statements. |
 | `parsing.py` | PDF → verified transactions: decrypt, redact, parse, reconcile. |
 | `merchants.py` | Description → the merchant key the categorizer learns against. Phase 2, step 1. |
+| `groups.py` | Which merchant keys are outlets of one company. Suggests; never merges on its own. |
 | `categorize.py` | Tiers 1 and 2, and the `flow_type` axis. Pure functions; no DB, no network. |
 | `tier3.py` | Tier 3: the prompt, the schema, the response gate and the Gemini client. The only outbound request in the app. |
 | `months.py` | Calendar months, and how much of one the statements actually cover. Pure functions. |
@@ -125,6 +126,24 @@ lists keys sharing a first word together — a merchant the statement spells two
 ways shows up as adjacent rows. They are never merged automatically; that is
 the eager root-collapse `merchants.py` refuses, and the person reading the
 screen can see what a machine should not assume.
+
+**Grouping outlets is a label, not a key.** Nine McDonald's outlets are nine
+small rows in "Top merchants" and one large one in reality. `/merchants/groups`
+folds them into one line on the month and analytics pages, with the branches
+one click down. It is stored in `merchant_group`, which maps a key to a company
+name and touches nothing else — `merchant_normalized` on every transaction is
+unchanged, so categories, rules and memory carry on working per outlet, and
+ungrouping has nothing to undo. That is the whole safety argument: the worst a
+wrong group can do is add two numbers together on a page that can expand them
+again.
+
+**Groups are proposed, never applied.** `groups.py` proposes keys that share a
+leading *name* — two words is enough by itself; one word only when the company
+also bills under the bare name (`grab` beside `grab rides-ec petaling`) or every
+remainder is a branch code (`mcdonald's (apm)`). `royal plaza` and `royal
+sporting house` fail all of it and are not proposed, which is the case the rule
+exists for. The user confirms each one, for the same reason `merchants.py`
+refuses to collapse keys and `/merchants` refuses to merge adjacent rows.
 
 **An unknown merchant stays uncategorized, not `Other`.** A merchant no rule,
 no memory entry and no model knows gets nothing, and the transactions page

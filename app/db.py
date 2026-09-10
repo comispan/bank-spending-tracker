@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import categorize
+import groups
 import merchants
 import months
 import rows
@@ -146,6 +147,22 @@ CREATE TABLE IF NOT EXISTS merchant_memory (
     hit_count   INTEGER NOT NULL DEFAULT 0,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Outlets of one company, folded into one label for reporting (groups.py).
+-- Deliberately not part of the key: `merchant_normalized` still says which
+-- Sheng Siong, and tier 2, rules and memory all still key on it. This table
+-- only decides what the report calls the row, which is why a wrong entry here
+-- adds two numbers together on a page that can expand them again, and can
+-- never file a transaction under the wrong merchant.
+--
+-- Membership is per key, not per group, so a key belongs to at most one group
+-- by construction and the label expression can be a plain LEFT JOIN.
+CREATE TABLE IF NOT EXISTS merchant_group (
+    merchant_normalized TEXT PRIMARY KEY,
+    group_name  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS group_by_name ON merchant_group(group_name);
 """
 
 
@@ -759,6 +776,7 @@ TXN_PAGE_SIZE = 100
 def transaction_page(conn: sqlite3.Connection, *, uncategorized: bool = False,
                      month: str | None = None, category: str | None = None,
                      account: int | None = None, merchant: str | None = None,
+                     merchant_group: str | None = None,
                      flow: str | None = None, page: int = 1,
                      per_page: int = TXN_PAGE_SIZE) -> dict[str, Any]:
     """One page of the all-transactions list, with the totals the page needs.
@@ -785,6 +803,14 @@ def transaction_page(conn: sqlite3.Connection, *, uncategorized: bool = False,
     if merchant:
         clauses.append("t.merchant_normalized = ?")
         args.append(merchant)
+    if merchant_group:
+        # Where a company row on a report drills through to: every outlet of
+        # it at once. Kept as a separate filter from `merchant` rather than
+        # overloading it, so the page can say which of the two it is showing.
+        clauses.append("""t.merchant_normalized IN
+                          (SELECT merchant_normalized FROM merchant_group
+                           WHERE group_name = ?)""")
+        args.append(merchant_group)
     if flow:
         clauses.append("t.flow_type = ?")
         args.append(flow)
@@ -973,14 +999,22 @@ def month_notable(conn: sqlite3.Connection, ym: str, trailing: list[str],
     spend = """CASE WHEN t.flow_type='spend' THEN t.amount_sgd_minor
                     WHEN t.flow_type='refund' THEN -t.amount_sgd_minor ELSE 0 END"""
 
+    # "Earlier row" means earlier row *from the same company*: once outlets are
+    # grouped, a first visit to a new Sheng Siong branch is not a new merchant,
+    # and reporting it as one would be the grouped label contradicting itself
+    # two headings further down the same page.
     new_merchants = conn.execute(
-        f"""SELECT t.merchant_normalized AS label, COUNT(*) AS n,
-                   COALESCE(SUM({spend}), 0) AS v
-            FROM txn t
+        f"""SELECT {_GLABEL} AS label, COUNT(*) AS n,
+                   COALESCE(SUM({spend}), 0) AS v,
+                   MAX(g.group_name IS NOT NULL) AS grouped
+            FROM txn t {_GJOIN}
             WHERE t.txn_date BETWEEN ? AND ? AND t.merchant_normalized <> ''
-              AND NOT EXISTS (SELECT 1 FROM txn p
-                              WHERE p.merchant_normalized = t.merchant_normalized
-                                AND p.txn_date < ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM txn p
+                  LEFT JOIN merchant_group pg
+                         ON pg.merchant_normalized = p.merchant_normalized
+                  WHERE COALESCE(pg.group_name, p.merchant_normalized) = {_GLABEL}
+                    AND p.txn_date < ?)
             GROUP BY 1 HAVING v > 0 ORDER BY v DESC LIMIT 12""",
         (start, end, start)).fetchall()
 
@@ -1015,7 +1049,13 @@ def month_notable(conn: sqlite3.Connection, ym: str, trailing: list[str],
 
 
 def month_detail(conn: sqlite3.Connection, ym: str) -> dict[str, Any]:
-    """Category, card and merchant breakdown for one calendar month."""
+    """Category, card and merchant breakdown for one calendar month.
+
+    The merchant breakdown is by *company* where the user has grouped outlets
+    (`groups.py`), with the outlets themselves carried along on `members` so
+    the page can expand the row rather than send the reader elsewhere to find
+    out what a group is made of.
+    """
     start, end = months.month_bounds(ym)
     args = (start, end)
 
@@ -1038,13 +1078,18 @@ def month_detail(conn: sqlite3.Connection, ym: str) -> dict[str, Any]:
                                         ELSE 0 END), 0) AS v
                FROM txn t JOIN account a ON a.id = t.account_id
                WHERE t.txn_date BETWEEN ? AND ? GROUP BY 1 ORDER BY v DESC"""),
-        "by_merchant": rows_for(
-            """SELECT t.merchant_normalized AS label, COUNT(*) AS n,
-                      COALESCE(SUM(CASE WHEN t.flow_type='spend' THEN t.amount_sgd_minor
-                                        WHEN t.flow_type='refund' THEN -t.amount_sgd_minor
-                                        ELSE 0 END), 0) AS v
-               FROM txn t WHERE t.txn_date BETWEEN ? AND ?
-               GROUP BY 1 HAVING v > 0 ORDER BY v DESC LIMIT 12"""),
+        "by_merchant": _attach_members(
+            [dict(r) for r in rows_for(
+                f"""SELECT {_GLABEL} AS label, COUNT(*) AS n,
+                           COALESCE(SUM({_SPEND}), 0) AS v
+                    FROM txn t {_GJOIN} WHERE t.txn_date BETWEEN ? AND ?
+                    GROUP BY 1 HAVING v > 0 ORDER BY v DESC LIMIT 12""")],
+            rows_for(
+                f"""SELECT {_GLABEL} AS label, t.merchant_normalized AS member,
+                           COUNT(*) AS n, COALESCE(SUM({_SPEND}), 0) AS v
+                    FROM txn t {_GJOIN}
+                    WHERE t.txn_date BETWEEN ? AND ? AND g.group_name IS NOT NULL
+                    GROUP BY 1, 2 ORDER BY v DESC""")),
         "excluded": rows_for(
             """SELECT t.flow_type AS label, COUNT(*) AS n,
                       COALESCE(SUM(t.amount_sgd_minor), 0) AS v
@@ -1057,6 +1102,32 @@ def month_detail(conn: sqlite3.Connection, ym: str) -> dict[str, Any]:
 _SPEND = """CASE WHEN t.flow_type = 'spend'  THEN t.amount_sgd_minor
                  WHEN t.flow_type = 'refund' THEN -t.amount_sgd_minor
                  ELSE 0 END"""
+
+
+# What a report calls a merchant row: the company if the user has grouped this
+# outlet under one, otherwise the merchant key itself. Every merchant
+# breakdown in this module uses this pair, so the month page and the analytics
+# page cannot end up disagreeing about what a row is.
+_GJOIN = "LEFT JOIN merchant_group g ON g.merchant_normalized = t.merchant_normalized"
+_GLABEL = "COALESCE(g.group_name, t.merchant_normalized)"
+
+
+def _attach_members(rows: list[dict], members: list) -> list[dict]:
+    """Hang each group's outlets off the group row, for the drill-down.
+
+    Only rows that are actually a group get a `members` list; an ungrouped
+    merchant gets none, so the template can ask `if r.members` rather than
+    having to tell a one-member group from a plain merchant.
+    """
+    by_label: dict[str, list[dict]] = {}
+    for m in members:
+        by_label.setdefault(m["label"], []).append(
+            {"key": m["member"], "v": m["v"], "n": m["n"]})
+    for r in rows:
+        found = by_label.get(r["label"])
+        if found:
+            r["members"] = found
+    return rows
 
 
 def _pivot(rows: list[sqlite3.Row], months: list[str], top: int | None = None) -> list[dict[str, Any]]:
@@ -1152,8 +1223,17 @@ def analytics(conn: sqlite3.Connection) -> dict[str, Any]:
         "by_category": [r for r in grid("COALESCE(t.category, '(uncategorized)')")
                         if r["total"] > 0],
         "by_card": grid(card_label, join="JOIN account a ON a.id = t.account_id"),
-        "by_merchant": grid("t.merchant_normalized",
-                            where="AND t.merchant_normalized <> ''", top=12),
+        # By company where outlets are grouped, with the outlets on `members`
+        # for the drill-down — the same shape the month page uses.
+        "by_merchant": _attach_members(
+            grid(_GLABEL, join=_GJOIN, where="AND t.merchant_normalized <> ''", top=12),
+            conn.execute(
+                f"""SELECT {_GLABEL} AS label, t.merchant_normalized AS member,
+                           COALESCE(SUM({_SPEND}), 0) AS v, COUNT(*) AS n
+                    FROM txn t {_GJOIN}
+                    WHERE substr(t.txn_date, 1, 7) IN ({marks})
+                      AND g.group_name IS NOT NULL
+                    GROUP BY 1, 2 ORDER BY v DESC""", months).fetchall()),
         # Held-out flows are shown at their gross amount, the way the single
         # month page shows them — a card payment is the same money moving and
         # netting it would say nothing.
@@ -1198,6 +1278,91 @@ def merchant_summary(conn: sqlite3.Connection, unknown_only: bool = True) -> lis
     # weight, which is a second pass over the same rows and reads far better as
     # a tested function than as a correlated subquery.
     return merchants.cluster_order([dict(r, weight=abs(r["value_minor"] or 0)) for r in rows])
+
+
+def merchant_group_list(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every confirmed group, with what it is made of and what it is worth.
+
+    Ordered by money, because that is the order the question "is this grouping
+    right?" is worth asking in: a group folding four figures into one line
+    deserves a second look, a group of two dollars does not.
+    """
+    rows = conn.execute(
+        f"""SELECT g.group_name AS name, g.merchant_normalized AS key,
+                   COUNT(t.id) AS rows_total,
+                   COALESCE(SUM({_SPEND}), 0) AS value_minor
+            FROM merchant_group g
+            LEFT JOIN txn t ON t.merchant_normalized = g.merchant_normalized
+            GROUP BY 1, 2 ORDER BY g.group_name, value_minor DESC"""
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        e = out.setdefault(r["name"], {"name": r["name"], "members": [],
+                                       "rows_total": 0, "value_minor": 0})
+        e["members"].append({"key": r["key"], "rows_total": r["rows_total"],
+                             "value_minor": r["value_minor"]})
+        e["rows_total"] += r["rows_total"]
+        e["value_minor"] += r["value_minor"]
+    return sorted(out.values(), key=lambda e: -abs(e["value_minor"]))
+
+
+def merchant_group_suggestions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """What `groups.py` would propose, priced so the user can judge it.
+
+    Keys already in a group are held out, so this list shrinks as it is worked
+    through and never re-offers a decision that has been made.
+    """
+    stats = {r["key"]: r for r in conn.execute(
+        f"""SELECT t.merchant_normalized AS key, COUNT(*) AS rows_total,
+                   COALESCE(SUM({_SPEND}), 0) AS value_minor,
+                   MAX(t.description_raw) AS example
+            FROM txn t WHERE t.merchant_normalized IS NOT NULL
+              AND t.merchant_normalized <> '' GROUP BY 1""")}
+    taken = {r["merchant_normalized"] for r in
+             conn.execute("SELECT merchant_normalized FROM merchant_group")}
+    out = []
+    for g in groups.suggest(stats, taken):
+        members = [{"key": k, "rows_total": stats[k]["rows_total"],
+                    "value_minor": stats[k]["value_minor"],
+                    "example": stats[k]["example"]} for k in g["members"]]
+        out.append({"name": g["name"], "members": members,
+                    "rows_total": sum(m["rows_total"] for m in members),
+                    "value_minor": sum(m["value_minor"] for m in members)})
+    return sorted(out, key=lambda e: -abs(e["value_minor"]))
+
+
+def set_merchant_group(conn: sqlite3.Connection, name: str, keys: list[str]) -> int:
+    """Confirm a group: these keys, under this name.
+
+    Replaces the group's membership wholesale rather than adding to it, so the
+    same call serves "confirm this suggestion", "rename it" and "drop an outlet
+    that does not belong" — the screen posts the checkboxes that are ticked and
+    what is not ticked is out.
+    """
+    name = " ".join((name or "").split())
+    keys = [k for k in dict.fromkeys(keys) if k]
+    if not name or len(keys) < 2:
+        # A group of one is just a merchant, and storing it would put a label
+        # on a report row that is already correct without one.
+        return 0
+    conn.execute("DELETE FROM merchant_group WHERE group_name = ?", (name,))
+    conn.executemany(
+        """INSERT INTO merchant_group (merchant_normalized, group_name, updated_at)
+           VALUES (?, ?, datetime('now'))
+           ON CONFLICT(merchant_normalized) DO UPDATE SET
+               group_name = excluded.group_name, updated_at = excluded.updated_at""",
+        [(k, name) for k in keys])
+    return len(keys)
+
+
+def delete_merchant_group(conn: sqlite3.Connection, name: str) -> int:
+    """Ungroup: the outlets go back to being their own rows on the report.
+
+    Nothing about the transactions changes — there was never anything stored on
+    them to undo, which is the point of grouping living above the key.
+    """
+    cur = conn.execute("DELETE FROM merchant_group WHERE group_name = ?", (name,))
+    return cur.rowcount
 
 
 def list_memory(conn: sqlite3.Connection) -> list[sqlite3.Row]:

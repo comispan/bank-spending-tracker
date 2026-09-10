@@ -499,6 +499,28 @@ Dedup key: `(account_id, date ±3 days, amount, merchant_normalized)`. Two match
 - New/unusual: merchants not seen before, and categories >50% above their trailing average.
 - Drill-through from any figure to the transaction list, and from any transaction to the source PDF page.
 
+**Merchant groups — added after the reports were live.** Top merchants was
+reading wrong in a way no total could show: nine McDonald's outlets, four Sheng
+Siong branches and five Paris Baguette shops each arrive as separate merchant
+keys, so the biggest lines in the year were scattered into small ones. 348
+distinct keys in the corpus hold about 26 of these clusters.
+
+Fixing it in `merchants.py` is the wrong place — the key is what tier 2 learns a
+category against, and merging two keys that are not one merchant misfiles real
+rows. So grouping sits *above* the key: `merchant_group` maps a key to a company
+name, and only the report label changes. `merchant_normalized` on the
+transaction is untouched, so rules, memory and tier 3 are unaffected, and
+ungrouping is a delete with nothing to reverse. A wrong group adds two numbers
+together on a page that can expand them again; it cannot categorize anything
+wrongly.
+
+Suggested, then confirmed. Keys are proposed as one company when they share a
+leading *name*: two tokens on their own, one token only when the bare name is
+itself billed or every remainder is a branch code. `royal plaza` and `royal
+sporting house` share a word and nothing else and are never proposed — that pair
+is the test the rule exists to fail. The user ticks what is right on
+`/merchants/groups`; nothing groups itself.
+
 That last one — **every number traces back to a page in a PDF** — is what makes users trust it. Store the page number and bounding box at extraction time; it costs nothing then and is impossible to reconstruct later.
 
 ---
@@ -526,7 +548,13 @@ transaction     id, account_id, statement_id,
 merchant_rule   id, pattern, match_type(exact|contains|regex),
                 category, flow_type, priority
 merchant_memory merchant_normalized, category, hit_count, updated_at
+merchant_group  merchant_normalized, group_name, updated_at
 ```
+
+`merchant_group` is reporting only, and deliberately keyed by merchant rather
+than by group: a key belongs to at most one company by construction, so the
+report label is a plain `COALESCE(group_name, merchant_normalized)` and there is
+no second place for the two to disagree.
 
 `issuer_template` is gone — one generic parser handles all five issuers. Add it back when a bank actually breaks, not in anticipation.
 

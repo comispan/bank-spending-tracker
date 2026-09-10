@@ -109,12 +109,38 @@
   <thead><tr><th>Merchant</th><th class="num">Spend</th><th class="num">Rows</th></tr></thead>
   <tbody>
   {% for r in d.by_merchant %}
-    <tr><td><a href="/transactions?month={{ m.month }}&merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a></td>
-        <td class="num">{{ r.v | money }}</td>
-        <td class="num muted">{{ r.n }}</td></tr>
+    <tr>
+      <td>
+      {%- if r.members -%}
+        {# A company you have grouped: one line here, the branches one click
+           down, and the link goes to all of their rows at once. #}
+        <a href="/transactions?month={{ m.month }}&merchant_group={{ r.label | urlencode }}">{{ r.label }}</a>
+        <details class="outlets">
+          <summary>{{ r.members | length }} outlets</summary>
+          <ul>
+            {% for o in r.members %}
+            <li>
+              <a href="/transactions?month={{ m.month }}&merchant={{ o.key | urlencode }}"><code>{{ o.key }}</code></a>
+              <span class="num">{{ o.v | money }}</span>
+              <span class="muted">{{ o.n }} rows</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </details>
+      {%- else -%}
+        <a href="/transactions?month={{ m.month }}&merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a>
+      {%- endif -%}
+      </td>
+      <td class="num">{{ r.v | money }}</td>
+      <td class="num muted">{{ r.n }}</td>
+    </tr>
   {% endfor %}
   </tbody>
 </table>
+<p class="hint">
+  Outlets of one company are one line where you have
+  <a href="/merchants/groups">grouped them</a>.
+</p>
 
 <h2>New and unusual</h2>
 {% if notable.new_merchants %}
@@ -127,7 +153,7 @@
   <thead><tr><th>First seen this month</th><th class="num">Spend</th><th class="num">Rows</th></tr></thead>
   <tbody>
   {% for r in notable.new_merchants %}
-    <tr><td><a href="/transactions?month={{ m.month }}&merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a></td>
+    <tr><td><a href="/transactions?month={{ m.month }}&{{ 'merchant_group' if r.grouped else 'merchant' }}={{ r.label | urlencode }}"><code>{{ r.label }}</code></a></td>
         <td class="num">{{ r.v | money }}</td>
         <td class="num muted">{{ r.n }}</td></tr>
   {% endfor %}
