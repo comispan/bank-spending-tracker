@@ -954,6 +954,114 @@ def test_merchant_normalization() -> None:
           sorted(order) == sorted(e["key"] for e in entries), repr(order))
 
 
+def test_merchant_groups() -> None:
+    """`groups.suggest` and the grouped reporting label.
+
+    Two separate things are protected here. First, that a suggestion is only
+    made where the shared prefix is a *name* — the `royal plaza` / `royal
+    sporting house` case is the one this whole rule exists to fail on, and it
+    is the case that would be wrong silently. Second, that grouping is a label
+    and nothing more: the merchant key on every row is untouched, so a group
+    can never move a category.
+    """
+    print("\nmerchant groups")
+    import sqlite3
+
+    import db
+    import groups
+
+    keys = ["sheng siong ss jl", "sheng siong supermarke", "sheng siong supermarket",
+            "royal plaza", "royal sporting house",
+            "mcdonald's (apm)", "mcdonald's (bdml)",
+            "grab", "grab rides-ec petaling",
+            "uniqlo ion orchard"]
+    found = {g["name"]: g["members"] for g in groups.suggest(keys)}
+
+    check("outlets sharing two name words are proposed together",
+          set(found.get("sheng siong", [])) ==
+          {"sheng siong ss jl", "sheng siong supermarke", "sheng siong supermarket"},
+          repr(found.get("sheng siong")))
+    # The case the module exists to get right. One shared word, no bare
+    # `royal`, and what follows it is a name and not a branch code.
+    check("two shops sharing one ordinary word are not proposed",
+          not any(n.startswith("royal") for n in found), repr(found))
+    check("a bracketed branch code makes one shared word enough",
+          set(found.get("mcdonald's", [])) == {"mcdonald's (apm)", "mcdonald's (bdml)"},
+          repr(found.get("mcdonald's")))
+    check("a company that also bills under its bare name is proposed",
+          set(found.get("grab", [])) == {"grab", "grab rides-ec petaling"},
+          repr(found.get("grab")))
+    check("a merchant with nothing to group with is left alone",
+          not any("uniqlo ion orchard" in ms for ms in found.values()), repr(found))
+    # Membership is settled on the shortest qualifying prefix, but the name
+    # walks forward through what every member agrees on.
+    named = {g["name"] for g in groups.suggest(["guzman y gomez", "guzman y gomez westgate"])}
+    check("the default name is the longest name the members agree on",
+          named == {"guzman y gomez"}, repr(named))
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    conn.execute("INSERT INTO account (id, issuer, kind) VALUES (1, 'DBS', 'credit')")
+    conn.execute(
+        """INSERT INTO statement (id, account_id, filename, file_sha256, storage_path,
+                                  period_start, period_end, page_count, parser_version,
+                                  status, verdict)
+           VALUES (1, 1, 's.pdf', 'h', '/s', '2026-01-01', '2026-01-31', 1, 't',
+                   'parsed', 'pass')""")
+    for tid, key, minor in ((1, "sheng siong ss jl", 1000),
+                            (2, "sheng siong supermarket", 2500),
+                            (3, "uniqlo ion orchard", 4000)):
+        conn.execute(
+            """INSERT INTO txn (id, account_id, statement_id, txn_date, description_raw,
+                                merchant_normalized, amount_minor, currency, amount_sgd_minor,
+                                direction, flow_type, category)
+               VALUES (?, 1, 1, '2026-01-05', ?, ?, ?, 'SGD', ?, 'debit', 'spend', 'Groceries')""",
+            (tid, key.upper(), key, minor, minor))
+
+    ungrouped = {r["label"]: r["v"] for r in db.month_detail(conn, "2026-01")["by_merchant"]}
+    check("without a group each outlet is its own row",
+          ungrouped == {"sheng siong ss jl": 1000, "sheng siong supermarket": 2500,
+                        "uniqlo ion orchard": 4000}, repr(ungrouped))
+
+    stored = db.set_merchant_group(
+        conn, "Sheng Siong", ["sheng siong ss jl", "sheng siong supermarket"])
+    check("confirming a group stores one row per member", stored == 2, stored)
+    check("a group of one is refused — that is just a merchant",
+          db.set_merchant_group(conn, "Solo", ["uniqlo ion orchard"]) == 0)
+
+    grouped = db.month_detail(conn, "2026-01")["by_merchant"]
+    totals = {r["label"]: r["v"] for r in grouped}
+    check("the outlets become one company row, summed",
+          totals == {"Sheng Siong": 3500, "uniqlo ion orchard": 4000}, repr(totals))
+    company = next(r for r in grouped if r["label"] == "Sheng Siong")
+    check("the company row carries its outlets for the drill-down",
+          {m["key"] for m in company["members"]} ==
+          {"sheng siong ss jl", "sheng siong supermarket"}, repr(company.get("members")))
+    check("an ungrouped merchant carries no outlet list",
+          "members" not in next(r for r in grouped if r["label"] == "uniqlo ion orchard"))
+
+    page = db.transaction_page(conn, merchant_group="Sheng Siong")
+    check("a company row drills through to every outlet's rows at once",
+          page["total"] == 2 and page["shown_minor"] == 3500,
+          (page["total"], page["shown_minor"]))
+
+    # The whole safety argument for grouping: it is a label, so there is
+    # nothing on the transaction for a wrong group to have corrupted.
+    check("grouping leaves every merchant key untouched",
+          {r["merchant_normalized"] for r in conn.execute(
+              "SELECT merchant_normalized FROM txn")} ==
+          {"sheng siong ss jl", "sheng siong supermarket", "uniqlo ion orchard"})
+    check("a grouped key is held out of the next round of suggestions",
+          not any("sheng siong ss jl" in [m["key"] for m in g["members"]]
+                  for g in db.merchant_group_suggestions(conn)))
+
+    db.delete_merchant_group(conn, "Sheng Siong")
+    back = {r["label"]: r["v"] for r in db.month_detail(conn, "2026-01")["by_merchant"]}
+    check("ungrouping puts the rows back exactly as they were",
+          back == ungrouped, repr(back))
+
+
 def test_flow_type() -> None:
     """Whether a row is spending at all (DESIGN.md Section 3).
 
@@ -1805,6 +1913,7 @@ if __name__ == "__main__":
     test_month_coverage()
     test_cycle_dates()
     test_merchant_normalization()
+    test_merchant_groups()
     test_flow_type()
     test_resolution_order()
     test_tier3_gate()

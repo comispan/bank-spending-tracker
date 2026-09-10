@@ -496,8 +496,8 @@ def delete_all():
 def all_transactions(request: Request, error: str | None = None, notice: str | None = None,
                      uncategorized: int = 0, month: str | None = None,
                      category: str | None = None, account: int | None = None,
-                     merchant: str | None = None, flow: str | None = None,
-                     page: int = 1):
+                     merchant: str | None = None, merchant_group: str | None = None,
+                     flow: str | None = None, page: int = 1):
     """The rows themselves, and where every figure in the report drills through to.
 
     Section 4 asks that every number trace back to the transactions behind it,
@@ -520,14 +520,19 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
     with db.connect() as conn:
         result = db.transaction_page(
             conn, uncategorized=bool(uncategorized), month=month, category=category,
-            account=account, merchant=merchant, flow=flow, page=page)
+            account=account, merchant=merchant, merchant_group=merchant_group,
+            flow=flow, page=page)
         stats = db.coverage(conn)
         account_name = conn.execute(
             """SELECT issuer || CASE WHEN last4 IS NULL THEN '' ELSE ' ····' || last4 END
                  AS label FROM account WHERE id = ?""", (account,)).fetchone() if account else None
     active = [("month", month, month), ("category", category, category),
               ("account", account, account_name["label"] if account_name else None),
-              ("merchant", merchant, merchant), ("flow", flow, flow)]
+              ("merchant", merchant, merchant),
+              # Named differently from `merchant` on purpose: a company row and
+              # one of its outlets are different slices, and a filter chip that
+              # called both "merchant" would not say which one you are looking at.
+              ("company", merchant_group, merchant_group), ("flow", flow, flow)]
     return templates.TemplateResponse(request, "transactions.html", {
         "txns": result["rows"], "total": result["total"],
         "page": result["page"], "pages": result["pages"], "per_page": result["per_page"],
@@ -537,7 +542,8 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
         # filter change always lands back on page 1 rather than off the end.
         "query": urlencode({k: v for k, v in
                             [("month", month), ("category", category), ("account", account),
-                             ("merchant", merchant), ("flow", flow),
+                             ("merchant", merchant), ("merchant_group", merchant_group),
+                             ("flow", flow),
                              ("uncategorized", uncategorized or None)] if v}),
         "shown_minor": result["shown_minor"],
         "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
@@ -768,6 +774,59 @@ def save_merchant_categories(key: list[str] = Form(default=[]),
     return RedirectResponse(
         f"/merchants{'?all=1&' if all else '?'}notice={note.replace(' ', '+')}",
         status_code=303)
+
+
+@app.get("/merchants/groups", response_class=HTMLResponse)
+def merchant_groups(request: Request, error: str | None = None, notice: str | None = None):
+    """Fold the outlets of one company into one line on the reports.
+
+    Nine McDonald's outlets are nine small rows in "Top merchants" and one big
+    one in reality. This screen is where that gets said — and it is a screen
+    rather than a rule in `merchants.py` because merging two merchants that are
+    not the same merchant is the one mistake this app has consistently refused
+    to make on the user's behalf.
+
+    Everything here is reporting only. No transaction is touched, no category
+    moves, and ungrouping puts the rows back exactly as they were.
+    """
+    with db.connect() as conn:
+        existing = db.merchant_group_list(conn)
+        suggested = db.merchant_group_suggestions(conn)
+    return templates.TemplateResponse(request, "groups.html", {
+        "groups": existing, "suggested": suggested,
+        "grouped_keys": sum(len(g["members"]) for g in existing),
+        "error": error, "notice": notice,
+    })
+
+
+@app.post("/merchants/groups")
+def save_merchant_group(name: str = Form(""), member: list[str] = Form(default=[])):
+    """Confirm one group — the ticked outlets, under the name in the box.
+
+    One group per post, not the whole screen at once like `/merchants`: a
+    category is a small decision made many times, and a grouping is a larger
+    one made a couple of dozen times ever. Saving them one at a time is what
+    lets the notice name what actually happened.
+    """
+    with db.connect() as conn:
+        stored = db.set_merchant_group(conn, name, member)
+        conn.commit()
+    if not stored:
+        return redirect("/merchants/groups",
+                        error="A group needs a name and at least two merchants")
+    return redirect("/merchants/groups",
+                    notice=f"{name}: {stored} merchant(s) grouped")
+
+
+@app.post("/merchants/groups/delete")
+def drop_merchant_group(name: str = Form("")):
+    with db.connect() as conn:
+        dropped = db.delete_merchant_group(conn, name)
+        conn.commit()
+    if not dropped:
+        return redirect("/merchants/groups", error="No such group")
+    return redirect("/merchants/groups",
+                    notice=f"{name} ungrouped — {dropped} merchant(s) back on their own")
 
 
 @app.get("/rules", response_class=HTMLResponse)

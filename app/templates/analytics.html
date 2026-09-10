@@ -44,10 +44,32 @@
     <a class="qual" href="/months/{{ lo.month }}">{{ lo.month }}</a></dd></div>
 </dl>
 
-{# ---------- the label cell every table shares: same link, same look --------- #}
-{% macro label(r, kind) %}
+{# ---------- the label cell every table shares: same link, same look ---------
+
+   A merchant row is a *company* wherever the user has grouped outlets under
+   one (/merchants/groups), and then it drills through to every outlet at once.
+   `expand` adds the outlet list under the name: on in the lead view, off in
+   the month-by-month grid, where a fold inside a fold inside a dense table is
+   more structure than the row is worth. #}
+{% macro label(r, kind, expand=false) %}
   {%- if kind == 'card' and cards.get(r.label) -%}
     <a href="/transactions?account={{ cards[r.label] }}">{{ r.label }}</a>
+  {%- elif kind == 'merchant' and r.members -%}
+    <a href="/transactions?merchant_group={{ r.label | urlencode }}">{{ r.label }}</a>
+    {%- if expand -%}
+    <details class="outlets">
+      <summary>{{ r.members | length }} outlets</summary>
+      <ul>
+        {% for m in r.members %}
+        <li>
+          <a href="/transactions?merchant={{ m.key | urlencode }}"><code>{{ m.key }}</code></a>
+          <span class="num">{{ m.v | money }}</span>
+          <span class="muted">{{ m.n }} rows</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+    {%- endif -%}
   {%- elif kind == 'merchant' -%}
     <a href="/transactions?merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a>
   {%- elif kind == 'category' -%}
@@ -65,7 +87,7 @@
   <tbody>
   {% for r in rows %}
     <tr>
-      <td>{{ label(r, kind) }}</td>
+      <td>{{ label(r, kind, expand=true) }}</td>
       <td class="barcell">
         <span class="bar{{ ' unknown' if r.label == '(uncategorized)' }}"
               style="width: {{ (100 * r.total / biggest) | round | int if biggest > 0 and r.total > 0 else 0 }}%"></span>
@@ -123,6 +145,7 @@
           {%- if v -%}
             {%- set q = 'category=' ~ (r.label | urlencode) if kind == 'category'
                    else 'account=' ~ cards.get(r.label, '') if kind == 'card'
+                   else 'merchant_group=' ~ (r.label | urlencode) if kind == 'merchant' and r.members
                    else 'merchant=' ~ (r.label | urlencode) if kind == 'merchant'
                    else 'flow=' ~ (r.label | urlencode) -%}
             <a href="/transactions?month={{ ym }}&{{ q }}">{{ v | money }}</a>
@@ -232,6 +255,11 @@
 </details>
 
 <h2>Top merchants</h2>
+<p class="hint">
+  Outlets of one company count as one line where you have
+  <a href="/merchants/groups">grouped them</a> — expand a row to see the
+  branches behind it.
+</p>
 {{ bars(a.by_merchant, 'merchant') }}
 <details class="monthly">
   <summary>Month by month</summary>

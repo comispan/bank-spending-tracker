@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Merchant groups{% endblock %}
+{% block content %}
+
+<h1>Merchant groups</h1>
+<p class="hint">
+  One company, many outlets. <code>sheng siong ss jl</code> and
+  <code>sheng siong supermarket</code> are the same shop billing from two
+  branches, and on a report they should be one line. Grouping them here folds
+  them together in <a href="/analytics">Analytics</a> and on each month page —
+  and every grouped row can still be expanded to show the outlets behind it.
+</p>
+<p class="hint">
+  <strong>This changes labels, not data.</strong> Each transaction keeps its own
+  merchant key, so categories, rules and merchant memory carry on working per
+  outlet exactly as before. Ungrouping puts the rows back with nothing to undo.
+  That is also why nothing is grouped for you: the worst a wrong group can do is
+  add two numbers together, but it is still your call which two.
+</p>
+
+<h2>Grouped</h2>
+{% if not groups %}
+  <p class="empty">Nothing grouped yet. The suggestions below are a starting point.</p>
+{% else %}
+<p class="hint">
+  {{ groups | length }} group(s) covering {{ grouped_keys }} merchant keys.
+  Untick an outlet that does not belong and save, or rename the group — the
+  name is what the reports show.
+</p>
+{% for g in groups %}
+<form method="post" action="/merchants/groups" class="groupcard">
+  <div class="grouphead">
+    <input type="text" name="name" value="{{ g.name }}" aria-label="Group name">
+    <span class="num">{{ g.value_minor | money }}</span>
+    <span class="muted">{{ g.rows_total }} rows</span>
+    <a href="/transactions?merchant_group={{ g.name | urlencode }}">see the rows</a>
+  </div>
+  <ul class="members">
+    {% for m in g.members %}
+    <li>
+      <label>
+        <input type="checkbox" name="member" value="{{ m.key }}" checked>
+        <code>{{ m.key }}</code>
+      </label>
+      <span class="num">{{ m.value_minor | money }}</span>
+      <span class="muted">{{ m.rows_total }} rows</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="groupactions">
+    <button type="submit" class="tiny">Save group</button>
+    <button type="submit" class="tiny" formaction="/merchants/groups/delete">Ungroup</button>
+    <span class="hint">Unticking every outlet but one is the same as ungrouping.</span>
+  </p>
+</form>
+{% endfor %}
+{% endif %}
+
+<h2>Suggested</h2>
+{% if not suggested %}
+  <p class="empty">
+    Nothing left to suggest — every merchant that shares a name with another is
+    already grouped or already one line.
+  </p>
+{% else %}
+<p class="hint">
+  Merchant keys that share a leading <em>name</em>, not merely a leading word:
+  two words is enough on its own, one word only when the company also bills
+  under the bare name or every remainder is an outlet code. That is what keeps
+  <code>royal plaza</code> and <code>royal sporting house</code> off this list.
+  Read each one before you take it — this is a proposal, and it is wrong
+  sometimes.
+</p>
+{% for g in suggested %}
+<form method="post" action="/merchants/groups" class="groupcard">
+  <div class="grouphead">
+    <input type="text" name="name" value="{{ g.name }}" aria-label="Group name">
+    <span class="num">{{ g.value_minor | money }}</span>
+    <span class="muted">{{ g.rows_total }} rows across {{ g.members | length }} keys</span>
+  </div>
+  <ul class="members">
+    {% for m in g.members %}
+    <li>
+      <label>
+        <input type="checkbox" name="member" value="{{ m.key }}" checked>
+        <code>{{ m.key }}</code>
+      </label>
+      <span class="num">{{ m.value_minor | money }}</span>
+      <span class="muted">{{ m.rows_total }} rows</span>
+      <span class="muted example">{{ m.example }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="groupactions">
+    <button type="submit" class="tiny">Group these</button>
+  </p>
+</form>
+{% endfor %}
+{% endif %}
+
+{% endblock %}
