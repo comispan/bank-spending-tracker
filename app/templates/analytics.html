@@ -36,8 +36,12 @@
 <dl class="facts">
   <div><dt>Months compared</dt><dd class="num">{{ a.months | length }}</dd></div>
   <div><dt>Average month</dt><dd class="num">{{ a.avg_minor | money }}</dd></div>
-  <div><dt>Highest</dt><dd class="num">{{ hi.spend | money }} <span class="muted">{{ hi.month }}</span></dd></div>
-  <div><dt>Lowest</dt><dd class="num">{{ lo.spend | money }} <span class="muted">{{ lo.month }}</span></dd></div>
+  {# The month is a qualifier, not part of the figure — and it is also the
+     answer to the obvious next question, so it opens that month. #}
+  <div><dt>Highest</dt><dd class="num">{{ hi.spend | money }}
+    <a class="qual" href="/months/{{ hi.month }}">{{ hi.month }}</a></dd></div>
+  <div><dt>Lowest</dt><dd class="num">{{ lo.spend | money }}
+    <a class="qual" href="/months/{{ lo.month }}">{{ lo.month }}</a></dd></div>
 </dl>
 
 {# ---------- the label cell every table shares: same link, same look --------- #}
