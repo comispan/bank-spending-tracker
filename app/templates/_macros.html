@@ -40,3 +40,33 @@
   {% endif %}
 </form>
 {% endmacro %}
+
+
+{# The hover readout for SVG chart marks, shared by /analytics and /months so
+   the two charts behave the same. Inline JS, no library — the app's stance on
+   outbound requests (Section 7) rules a CDN out for a tooltip, and this is one
+   delegated listener rather than a handler per mark.
+
+   Call it once per page, after the charts. Any element with `data-tip` on the
+   page is picked up, so a new chart needs no wiring. #}
+{% macro charttip() %}
+<div class="charttip" hidden></div>
+<script>
+  (function () {
+    var tip = document.querySelector('.charttip');
+    if (!tip) return;
+    document.addEventListener('pointerover', function (e) {
+      var el = e.target.closest('[data-tip]');
+      if (!el) return;
+      tip.textContent = el.getAttribute('data-tip');
+      tip.hidden = false;
+      var r = el.getBoundingClientRect();
+      tip.style.left = (window.scrollX + r.left + r.width / 2) + 'px';
+      tip.style.top = (window.scrollY + r.top - 8) + 'px';
+    });
+    document.addEventListener('pointerout', function (e) {
+      if (e.target.closest('[data-tip]')) tip.hidden = true;
+    });
+  })();
+</script>
+{% endmacro %}

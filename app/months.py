@@ -250,3 +250,98 @@ def trailing_window(status: dict, earlier: list[dict]) -> tuple[list[dict], list
             f"fewer than two earlier months are billed across days {days[0]}–{days[1]}"
             + (f" — {', '.join(short)} fall short" if short else ""))
     return usable, short, None
+
+
+_MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _month_first(day: dt.date, shift: int = 0) -> dt.date:
+    """The first of `day`'s month, moved `shift` whole months."""
+    index = day.year * 12 + day.month - 1 + shift
+    return dt.date(index // 12, index % 12 + 1, 1)
+
+
+def coverage_timeline(coverage: dict[str, list[tuple[str, str]]],
+                      today: str | None = None, pad_months: int = 1) -> dict | None:
+    """Every card's coverage placed on one shared axis, for the /months chart.
+
+    A list of dates per card answers "when does this card start and stop"; it
+    does not answer "do the cards line up", which is the question the month
+    totals actually turn on — a month is only as complete as its least-covered
+    card, so the ragged right-hand edge *is* the reason the newest month is
+    part-billed. On one axis that is a shape you take in at a glance, and a
+    missing cycle stops being a comma in a run of dates.
+
+    Positions come back as fractions of the axis — 0 at the left edge, 1 at the
+    right — so the caller scales them to whatever it is drawing. The axis is
+    padded by `pad_months` whole months at each end, snapped to month
+    boundaries, and stretched further where today would otherwise fall off it:
+    the bars keep clear of the edges, the gridlines land on real month starts,
+    and the empty strip past the last bar is the room the statement that has
+    not arrived yet will fill.
+
+    Returns None when nothing can be placed, which is not the same as having no
+    statements: a card whose statements are all unbounded (Section 4 — an end
+    date is what makes a window computable) has no windows to draw.
+    """
+    spans = [w for windows in coverage.values() for w in windows]
+    if not spans:
+        return None
+
+    now = dt.date.fromisoformat(today) if today else dt.date.today()
+    axis_start = _month_first(dt.date.fromisoformat(min(s for s, _ in spans)), -pad_months)
+    axis_end = _month_first(dt.date.fromisoformat(max(e for _, e in spans)), pad_months + 1) \
+        - dt.timedelta(days=1)
+    # A card nobody has uploaded for half a year would otherwise fall off the
+    # right-hand end and read as current, so today always stays on the axis:
+    # the empty run between the last bar and the marker is the measure of how
+    # stale the data is, and it is exactly what the padding is for.
+    axis_end = max(axis_end, _month_first(now, 1) - dt.timedelta(days=1))
+    total = (axis_end - axis_start).days + 1
+
+    def place(start: str, end: str) -> dict:
+        """One bar: where it begins, and how wide, both ends counted."""
+        first = dt.date.fromisoformat(start)
+        days = (dt.date.fromisoformat(end) - first).days + 1
+        return {"from": start, "to": end, "days": days,
+                "at": (first - axis_start).days / total, "len": days / total}
+
+    ticks = []
+    tick = axis_start
+    while tick <= axis_end:
+        ticks.append({"date": tick.isoformat(),
+                      "at": (tick - axis_start).days / total,
+                      "year_start": tick.month == 1 or tick == axis_start,
+                      "label": _MONTH_NAMES[tick.month - 1]
+                               + (f" {tick.year}" if tick.month == 1 or tick == axis_start else "")})
+        tick = _month_first(tick, 1)
+
+    rows = []
+    for label, windows in coverage.items():
+        segments, previous_end = [], None
+        for start, end in windows:
+            # `windows` is merged, so anything between two of them is a real
+            # hole — a statement nobody uploaded — and it is drawn, not skipped.
+            if previous_end:
+                hole = place((dt.date.fromisoformat(previous_end) + dt.timedelta(days=1)).isoformat(),
+                             (dt.date.fromisoformat(start) - dt.timedelta(days=1)).isoformat())
+                segments.append(dict(hole, kind="gap"))
+            segments.append(dict(place(start, end), kind="covered"))
+            previous_end = end
+        rows.append({
+            "label": label, "segments": segments,
+            "from": windows[0][0] if windows else None,
+            "to": windows[-1][1] if windows else None,
+            "days": sum(s["days"] for s in segments if s["kind"] == "covered"),
+            "gaps": sum(1 for s in segments if s["kind"] == "gap"),
+        })
+
+    return {
+        "start": axis_start.isoformat(), "end": axis_end.isoformat(), "days": total,
+        "ticks": ticks, "rows": rows,
+        "today": (now - axis_start).days / total if axis_start <= now <= axis_end else None,
+        # The last day every card is billed to: where the ragged edge becomes
+        # a straight one, and the last day a month total can be trusted.
+        "all_covered_to": min((r["to"] for r in rows if r["to"]), default=None),
+    }
