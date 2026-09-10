@@ -50,17 +50,19 @@
   </p>
   <p>
     <strong>Exactly this is sent</strong> to
-    <code>{{ tier3_model }}</code> — merchant names only, no amounts, no dates,
-    no balances, no card numbers, no statement text:
+    <code>{{ tier3_model }}</code> — merchant names, each with one example line
+    from a statement it was billed on, so an opaque name has a chance of being
+    recognized. Still no amounts, no dates, no balances, no card numbers:
   </p>
   <pre class="payload">{{ tier3_payload }}</pre>
   {% if tier3_grounding %}
   <p class="hint">
-    <strong>Google Search is on.</strong> These names are also sent to Google as
-    search queries, not just read by the model — which is what lets it recognize
-    a company whose name says nothing about what it sells. Still names only, and
-    still nothing else. Remove <code>GEMINI_GROUNDING</code> from your
-    environment or <code>.env</code> and restart to turn it off.
+    <strong>Google Search is on.</strong> The model can turn what's above —
+    a name, an example line, or both — into search queries of its own choosing,
+    not just read them, which is what lets it recognize a company whose name
+    says nothing about what it sells. Still never amounts, dates, balances or
+    card numbers. Remove <code>GEMINI_GROUNDING</code> from your environment
+    or <code>.env</code> and restart to turn it off.
   </p>
   {% endif %}
   {% if tier3_ready %}

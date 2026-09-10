@@ -653,7 +653,12 @@ def merchant_sweep(request: Request, all: int = 0,
         # Always the undecided set, whatever the screen is currently showing:
         # `?all=1` lists merchants that already have a category, and asking a
         # model about those would spend money to re-answer settled questions.
-        unknown_keys = [e["key"] for e in db.merchant_summary(conn, unknown_only=True)]
+        unknown = db.merchant_summary(conn, unknown_only=True)
+    unknown_keys = [e["key"] for e in unknown]
+    # One representative statement line per merchant, alongside the name — an
+    # opaque key like `2c2` means nothing on its own, and the example is often
+    # what lets the model (or a human) place it at all.
+    unknown_examples = {e["key"]: e["example"] for e in unknown}
     return templates.TemplateResponse(request, "merchants.html", {
         "entries": entries, "stats": stats, "show_all": bool(all),
         "categories": categorize.CATEGORIES,
@@ -666,7 +671,7 @@ def merchant_sweep(request: Request, all: int = 0,
         "tier3_grounding": tier3.grounding_enabled(),
         # The literal request body, so Section 9.4's disclosure is something
         # the user can read rather than a promise they have to take on trust.
-        "tier3_payload": tier3.prompt_payload(unknown_keys),
+        "tier3_payload": tier3.prompt_payload(unknown_keys, unknown_examples),
         "tier3_count": len(unknown_keys),
         "error": error, "notice": notice,
     })
@@ -689,14 +694,16 @@ def run_tier3(all: int = Form(0)):
     back = f"/merchants{'?all=1' if all else ''}"
 
     with db.connect() as conn:
-        keys = [e["key"] for e in db.merchant_summary(conn, unknown_only=True)]
+        unknown = db.merchant_summary(conn, unknown_only=True)
+    keys = [e["key"] for e in unknown]
+    examples = {e["key"]: e["example"] for e in unknown}
     if not keys:
         return redirect(back, notice="Nothing to ask about — every merchant is categorized")
     if not tier3.configured():
         return redirect(back, error="No Gemini API key. Set GEMINI_API_KEY in the "
                                     "environment or in a .env file at the project root.")
 
-    result = tier3.classify(keys)
+    result = tier3.classify(keys, examples=examples)
     assignments = result["assignments"]
 
     with db.connect() as conn:

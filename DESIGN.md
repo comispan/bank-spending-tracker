@@ -452,6 +452,19 @@ Any time a user recategorizes a transaction, write the mapping back into tier 2 
 > stores four. That is why `DEFAULT_MODEL` is back at `gemini-3.7-flash`: same
 > set, same prompt, same gate, and this section ranks on WRONG.
 
+> **Example lines added to the payload, 2026-09-05.** A bare normalized key
+> like `2c2` or `store` carries no signal at all, and no model — grounded or
+> not — recovers a fact that was never in the string. `merchant_summary`
+> already keeps one `description_raw` per merchant for the `/merchants` table
+> (the `example` column), so tier 3 now sends that alongside the key instead of
+> the key alone. It is still not the whole statement line: `description_raw`
+> is what the parser left over after splitting off amount, date and reference,
+> so amounts, dates, balances and card numbers stay out exactly as before —
+> only the merchant description itself is new. `prompt_payload()` takes an
+> optional `examples` dict for this reason rather than changing what a "key"
+> is; `spike/eval_categories.py` now pulls the same field so the grade doesn't
+> drift from what ships.
+
 **Category set** — keep it small and fixed in v1; a huge taxonomy makes both the LLM and the user worse at choosing:
 
 `Groceries · Dining · Transport · Shopping · Bills & Utilities · Health · Entertainment · Travel · Education · Fees & Interest · Cash & Transfers · Income/Refunds · Other`
@@ -546,7 +559,7 @@ Single-user and self-hosted removes most of the original surface here — there 
 
 - **Extraction discloses nothing.** No API key, no provider, no data terms to read. This was the largest item on this list and Phase 0 deleted it.
 - Statement passwords: use to decrypt in memory, **never store**.
-- The only outbound call is categorization (Section 3, tier 3), and only normalized merchant names — no amounts, dates, or balances. Say so plainly in the UI. Use a provider with no-training-on-inputs terms, or run it locally. **With `GEMINI_GROUNDING` on it is one call to two parties**: the same names also reach Google as search queries. Off by default, disclosed on `/merchants` when it is on, and Section 9.4 treats it as a separate decision for that reason.
+- The only outbound call is categorization (Section 3, tier 3), and only normalized merchant names plus one example statement line per merchant — no amounts, dates, balances, or card numbers. Say so plainly in the UI. Use a provider with no-training-on-inputs terms, or run it locally. **With `GEMINI_GROUNDING` on it is one call to two parties**: the model can turn either the name or the example into a Google Search query of its own choosing. Off by default, disclosed on `/merchants` when it is on, and Section 9.4 treats it as a separate decision for that reason.
 - Full card numbers are masked to last-4 at parse time (`redact()`), before anything is stored or written to disk.
 - Don't bind the server to `0.0.0.0`. Localhost only unless you have deliberately decided otherwise.
 - Offer hard delete: purge PDFs, transactions, and derived data.
