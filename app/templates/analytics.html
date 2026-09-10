@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% block title %}Analytics{% endblock %}
 {% block content %}
 
@@ -235,25 +236,7 @@
 </details>
 {% endif %}
 
-<div class="charttip" hidden></div>
-<script>
-  (function () {
-    var tip = document.querySelector('.charttip');
-    if (!tip) return;
-    document.addEventListener('pointerover', function (e) {
-      var el = e.target.closest('[data-tip]');
-      if (!el) return;
-      tip.textContent = el.getAttribute('data-tip');
-      tip.hidden = false;
-      var r = el.getBoundingClientRect();
-      tip.style.left = (window.scrollX + r.left + r.width / 2) + 'px';
-      tip.style.top = (window.scrollY + r.top - 8) + 'px';
-    });
-    document.addEventListener('pointerout', function (e) {
-      if (e.target.closest('[data-tip]')) tip.hidden = true;
-    });
-  })();
-</script>
+{{ m.charttip() }}
 
 {% endif %}
 

@@ -281,6 +281,26 @@ svg.colchart .collabel { fill: var(--ink); font-size: 11px;
   font-variant-numeric: tabular-nums; }
 table.spendtable { max-width: 30rem; }
 
+/* Card coverage timeline on /months. One axis for every card: the table it
+   leads could say when each card starts and stops, but not whether the five of
+   them line up — and the ragged right-hand edge is exactly why the newest month
+   is part-billed. The track behind each bar is the axis itself, so uncovered
+   time reads as absence; a hole *between* two cycles is a missing statement and
+   is drawn in the warn hue rather than left as more absence. */
+.tlwrap { margin-top: .9rem; }
+svg.cardtl { display: block; overflow: visible; }
+svg.cardtl .track { fill: var(--line); opacity: .45; }
+svg.cardtl .seg.covered { fill: var(--accent); }
+svg.cardtl .seg.gap { fill: var(--warn); opacity: .6; }
+svg.cardtl .seg:hover { opacity: .78; }
+svg.cardtl .grid { stroke: var(--line); stroke-width: 1; }
+svg.cardtl .grid.year { stroke: var(--muted); opacity: .45; }
+svg.cardtl .tick { fill: var(--muted); font-size: 10.5px; }
+svg.cardtl .tick.year { fill: var(--ink); }
+svg.cardtl .cardname { fill: var(--ink); font-size: 11.5px; }
+svg.cardtl .now { stroke: var(--fail); stroke-width: 1; stroke-dasharray: 3 3; }
+svg.cardtl .nowlabel { fill: var(--fail); font-size: 10px; }
+
 /* The simple view leads each section; the month-by-month grid folds away
    behind a native <details>, so the default read is bars anyone can take in
    and the dense numbers are one click, not the wall you land on. */

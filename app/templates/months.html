@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% block title %}Months{% endblock %}
 {% block content %}
 
@@ -84,24 +85,101 @@
 <p class="hint">
   Built from the periods the statements print. Where an issuer prints only a
   statement date, consecutive statements are assumed to tile the timeline — a
-  cycle ends where the next begins. A break in this list is a statement you have
-  not uploaded.
+  cycle ends where the next begins. A break in a card's bar is a statement you
+  have not uploaded.
 </p>
-<table>
-  <thead><tr><th>Card</th><th>Covered</th></tr></thead>
-  <tbody>
-  {% for label, windows in coverage.items() %}
-    <tr>
-      <td>{{ label }}</td>
-      <td class="date">
-        {% for start, end in windows %}
-          {{ start }} → {{ end }}{% if not loop.last %} <span class="src none">gap</span> {% endif %}
-        {% endfor %}
-      </td>
-    </tr>
+{% if timeline %}
+{# One axis for every card, because the question is not when a card starts and
+   stops — the dates below say that — but whether the five of them line up. The
+   ragged right-hand edge is the whole reason the newest month is part-billed,
+   and it is a shape you take in at a glance rather than five date ranges you
+   hold in your head and compare. #}
+{% set tl = timeline %}
+{% set W = 760 %}{% set labelW = 176 %}{% set rowH = 28 %}{% set barH = 12 %}
+{% set padT = 26 %}{% set padB = 18 %}
+{% set n = tl.rows | length %}{% set plotW = W - labelW %}
+{% set base = padT + n * rowH %}{% set H = base + padB %}
+<div class="chartwrap tlwrap">
+<svg class="cardtl" viewBox="0 0 {{ W }} {{ H }}" width="100%" role="img"
+     aria-label="Statement coverage for {{ n }} card{{ '' if n == 1 else 's' }} on one timeline, {{ tl.start }} to {{ tl.end }}.">
+  {% for t in tl.ticks %}
+    {% set next_at = tl.ticks[loop.index].at if not loop.last else 1.0 %}
+    {% set colw = (next_at - t.at) * plotW %}
+    <line class="grid{{ ' year' if t.year_start }}" y1="{{ padT - 6 }}" y2="{{ base }}"
+          x1="{{ (labelW + t.at * plotW) | round(1) }}" x2="{{ (labelW + t.at * plotW) | round(1) }}"/>
+    {# Below about 30px a month label collides with its neighbour, so a long
+       history keeps only the year marks rather than printing a smear. #}
+    {% if colw >= 30 or t.year_start %}
+      <text class="tick{{ ' year' if t.year_start }}" y="{{ padT - 12 }}" text-anchor="middle"
+            x="{{ (labelW + (t.at + next_at) / 2 * plotW) | round(1) }}">{{ t.label }}</text>
+    {% endif %}
   {% endfor %}
-  </tbody>
-</table>
+  <line class="grid" x1="{{ W }}" y1="{{ padT - 6 }}" x2="{{ W }}" y2="{{ base }}"/>
+
+  {% for r in tl.rows %}
+    {% set y = padT + loop.index0 * rowH %}
+    <text class="cardname" x="{{ labelW - 12 }}" y="{{ y + rowH / 2 + 4 }}" text-anchor="end">{{ r.label }}</text>
+    <rect class="track" x="{{ labelW }}" y="{{ y + (rowH - barH) / 2 }}"
+          width="{{ plotW }}" height="{{ barH }}" rx="3"/>
+    {% for s in r.segments %}
+      <rect class="seg {{ s.kind }}" y="{{ y + (rowH - barH) / 2 }}" height="{{ barH }}" rx="3"
+            x="{{ (labelW + s.at * plotW) | round(1) }}"
+            width="{{ [2, s.len * plotW] | max | round(1) }}"
+            data-tip="{{ r.label }} · {{ 'no statement' if s.kind == 'gap' else 'covered' }} · {{ s['from'] }} → {{ s.to }} · {{ s.days }} days">
+        <title>{{ r.label }}: {{ 'no statement, ' if s.kind == 'gap' }}{{ s['from'] }} to {{ s.to }}</title>
+      </rect>
+    {% endfor %}
+    {% if not r.segments %}
+      <text class="nowlabel" x="{{ labelW + 8 }}" y="{{ y + rowH / 2 + 4 }}">no statement bounds a cycle</text>
+    {% endif %}
+  {% endfor %}
+
+  {% if tl.today is not none %}
+    <line class="now" y1="{{ padT - 6 }}" y2="{{ base + 2 }}"
+          x1="{{ (labelW + tl.today * plotW) | round(1) }}" x2="{{ (labelW + tl.today * plotW) | round(1) }}"/>
+    <text class="nowlabel" y="{{ base + 13 }}" text-anchor="middle"
+          x="{{ (labelW + tl.today * plotW) | round(1) }}">today</text>
+  {% endif %}
+</svg>
+</div>
+<p class="hint caption">
+  A month either side of the data, so the ends are visible as ends. The strip
+  between where a bar stops and <strong>today</strong> is the statement that has
+  not arrived yet — that is what leaves the newest month part-billed, since a
+  month is only as complete as its least-covered card.
+  {% if tl.rows | selectattr('gaps') | first %}
+    Amber marks a cycle nobody uploaded: a hole in the middle of a run, not the
+    edge of one.
+  {% endif %}
+  Hover any bar for its dates.
+</p>
+{{ m.charttip() }}
+{% endif %}
+
+<details class="monthly">
+  <summary>Exact dates</summary>
+  <table>
+    <thead><tr><th>Card</th><th>Covered</th><th class="num">Days</th></tr></thead>
+    <tbody>
+    {% for label, windows in coverage.items() %}
+      <tr>
+        <td>{{ label }}</td>
+        <td class="date">
+          {% for start, end in windows %}
+            {{ start }} → {{ end }}{% if not loop.last %} <span class="src none">gap</span> {% endif %}
+          {% else %}
+            <span class="src none">no statement bounds a cycle</span>
+          {% endfor %}
+        </td>
+        <td class="num muted">
+          {%- set r = (timeline.rows if timeline else []) | selectattr('label', 'equalto', label) | first -%}
+          {{ r.days if r else '—' }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</details>
 {% endif %}
 
 {% endblock %}

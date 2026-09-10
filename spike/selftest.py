@@ -629,6 +629,65 @@ def test_month_coverage() -> None:
     check("a genuinely part-billed month still fails the window",
           not months.covers_days(month_status("2026-06", ("2026-06-01", "2026-06-20")), (1, 31)))
 
+    # The /months timeline. It draws the same coverage the table prints, so the
+    # thing worth testing is the geometry: a bar that lands a month early, or a
+    # missing cycle drawn as plain empty space, would make a page whose whole
+    # job is to be honest about coverage lie in a way nobody could see.
+    cov = {"A": [("2026-01-05", "2026-03-14"), ("2026-05-16", "2026-08-14")],
+           "B": [("2026-01-18", "2026-08-17")]}
+    tl = months.coverage_timeline(cov, today="2026-09-10")
+    check("the axis is padded a month either side, on month boundaries",
+          (tl["start"], tl["end"]) == ("2025-12-01", "2026-09-30"), repr((tl["start"], tl["end"])))
+    check("...and carries one tick per month in between",
+          [t["date"] for t in tl["ticks"]][:2] == ["2025-12-01", "2026-01-01"]
+          and len(tl["ticks"]) == 10, repr(len(tl["ticks"])))
+    check("january is marked, so a multi-year axis is readable",
+          [t["label"] for t in tl["ticks"] if t["year_start"]] == ["Dec 2025", "Jan 2026"],
+          repr([t["label"] for t in tl["ticks"] if t["year_start"]]))
+
+    # Fractions, not pixels: 2026-01-05 is 35 days into a 304-day axis.
+    first = tl["rows"][0]["segments"][0]
+    check("a bar starts where its window does",
+          abs(first["at"] - 35 / 304) < 1e-9 and first["days"] == 69,
+          repr((first["at"], first["days"])))
+    check("both ends of a window are inside it",
+          abs(first["len"] - 69 / 304) < 1e-9, repr(first["len"]))
+
+    # The hole between two merged windows is a statement nobody uploaded, and
+    # it is drawn. Left as background it would look like the padding at the
+    # ends, which means nothing at all.
+    kinds = [s["kind"] for s in tl["rows"][0]["segments"]]
+    check("a missing cycle is drawn, not left as empty space",
+          kinds == ["covered", "gap", "covered"], repr(kinds))
+    gap = tl["rows"][0]["segments"][1]
+    check("...spanning the days neither statement covers",
+          (gap["from"], gap["to"], gap["days"]) == ("2026-03-15", "2026-05-15", 62), repr(gap))
+    check("a card with no hole reports none",
+          tl["rows"][1]["gaps"] == 0 and tl["rows"][0]["gaps"] == 1)
+    check("covered days do not count the hole",
+          tl["rows"][0]["days"] == 69 + 91, repr(tl["rows"][0]["days"]))
+    check("the ragged edge is where the least-covered card stops",
+          tl["all_covered_to"] == "2026-08-14", repr(tl["all_covered_to"]))
+
+    # Today has to stay on the axis. A card nobody has uploaded for half a year
+    # would otherwise end a month before the right-hand edge and read as
+    # current — the empty run to the marker is the measure of how stale it is.
+    stale = months.coverage_timeline({"A": [("2026-01-01", "2026-02-28")]}, today="2026-09-10")
+    check("a long-abandoned card still shows today", stale["end"] == "2026-09-30"
+          and 0 < stale["today"] < 1, repr((stale["end"], stale["today"])))
+    check("...and its bar stops where its statements did",
+          stale["rows"][0]["segments"][-1]["to"] == "2026-02-28")
+
+    # Nothing to place is not the same as no statements: a card whose
+    # statements are all unbounded has no window to draw.
+    check("a card with no bounded cycle draws no bar",
+          months.coverage_timeline({"A": []}) is None)
+    mixed = months.coverage_timeline({"A": [], "B": [("2026-01-01", "2026-01-31")]},
+                                     today="2026-02-10")
+    check("...but does not take the other cards down with it",
+          [len(r["segments"]) for r in mixed["rows"]] == [0, 1],
+          repr([len(r["segments"]) for r in mixed["rows"]]))
+
 
 def test_cycle_dates() -> None:
     """When the statement date is a column header rather than a line label.

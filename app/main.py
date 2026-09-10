@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import categorize  # noqa: E402
 import db          # noqa: E402
 import merchants   # noqa: E402
+import months      # noqa: E402
 import parsing     # noqa: E402
 import tier3       # noqa: E402
 
@@ -576,7 +577,9 @@ def month_list(request: Request, error: str | None = None, notice: str | None = 
         report = db.month_report(conn)
         coverage = db.coverage_by_account(conn)
     return templates.TemplateResponse(request, "months.html", {
-        "report": report, "coverage": coverage, "error": error, "notice": notice,
+        "report": report, "coverage": coverage,
+        "timeline": months.coverage_timeline(coverage),
+        "error": error, "notice": notice,
     })
 
 
