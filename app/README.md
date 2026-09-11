@@ -81,13 +81,16 @@ a description replaced by a name that was never found is worse than one that is
 honestly not a merchant. The transactions page shows the original amount and
 the statement's own rate under the SGD figure.
 
-**The three-month average is usually absent, and says why.** It is held to the
-same rule as the month-on-month delta, for a sharper reason: an average hides a
-part-billed month better than a single comparison does. Three short months make
-one low figure with nothing on its face to say it is short, and every month
-compared against it then reads as an overspend. A month contributes only if it
-is billed across the days being reported, and two contributors are the minimum
-— an average of one month is last month, which the delta already shows.
+**The three-month average appears only once it can be trusted, and otherwise
+says why.** It is held to the same rule as the month-on-month delta, for a
+sharper reason: an average hides a part-billed month better than a single
+comparison does. Three short months make one low figure with nothing on its face
+to say it is short, and every month compared against it then reads as an
+overspend. A month contributes only if it is billed across the days being
+reported, and two contributors are the minimum — an average of one month is last
+month, which the delta already shows. On a corpus of eight months it renders
+from the fourth onward; the months before that name which earlier months fall
+short instead of printing a number.
 
 **"New" merchants are new to the statements you uploaded.** Not to your
 spending. An unbilled fortnight can hide a first visit, so the screen says the
@@ -235,10 +238,12 @@ way forever.
 
 ## Not here yet
 
-Transaction-level dedup, deferred on evidence: across 343 rows and 10
+Transaction-level dedup, deferred on evidence: across 1,556 rows and 40
 statements there are zero cross-statement duplicate candidates, and the
-`file_sha256` check plus the issuer reference cover what actually occurs. OCR
-for scanned statements is Phase 4.
+`file_sha256` check plus the issuer reference cover what actually occurs. The
+deferral was "build it when a duplicate appears" — re-checked as the corpus grew
+from 10 statements to 40, and one still has not. OCR for scanned statements is
+Phase 4: a scan is detected and refused today, which is honest but is not a parse.
 
 `category_confidence` from Section 5 is still unfilled — a rule, a memory hit and a
 derived flow are all certain, and tier 3 currently expresses doubt by abstaining
