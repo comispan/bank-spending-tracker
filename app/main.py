@@ -321,9 +321,10 @@ async def upload(file: UploadFile, password: str = Form("")):
     payload = await file.read()
     out = ingest_statement(payload, file.filename or "", password or None)
     if out.kind == "duplicate":
-        return RedirectResponse(
-            f"/statements/{out.statement_id}?notice=Already+uploaded+"
-            f"{(file.filename or '').replace(' ', '+')}", status_code=303)
+        # The filename is whatever the user's disk had in it, so it goes through
+        # the encoder — an `&` or a `#` in it would otherwise cut the message off.
+        return redirect(f"/statements/{out.statement_id}",
+                        notice=f"Already uploaded {file.filename or ''}")
     if out.kind == "rejected":
         return redirect("/", error=out.message)
     return RedirectResponse(f"/statements/{out.statement_id}", status_code=303)
@@ -773,9 +774,7 @@ def save_merchant_categories(key: list[str] = Form(default=[]),
         conn.commit()
 
     note = f"{len(pairs)} merchant(s) saved, {moved} transaction(s) categorized"
-    return RedirectResponse(
-        f"/merchants{'?all=1&' if all else '?'}notice={note.replace(' ', '+')}",
-        status_code=303)
+    return redirect(f"/merchants{'?all=1' if all else ''}", notice=note)
 
 
 @app.get("/merchants/groups", response_class=HTMLResponse)
