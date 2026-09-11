@@ -551,17 +551,20 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
     })
 
 
-def redirect(path: str, **params: str | None) -> RedirectResponse:
-    """A 303 back to `path` carrying notice/error text.
+def redirect(path: str, fragment: str = "", **params: str | None) -> RedirectResponse:
+    """A 303 back to `path` carrying notice/error text, and optionally an anchor.
 
     Properly encoded rather than the `.replace(' ', '+')` used by the older
     routes, because the messages here can carry an API error body — colons,
     quotes, ampersands and all — and one stray `&` would silently truncate the
-    message the user needs to read.
+    message the user needs to read. `path` often already carries a query string
+    (it is the page the user came from), so the joiner follows what is there —
+    a second `?` would fold the notice into the last filter's value.
     """
     query = urlencode({k: v for k, v in params.items() if v})
     joiner = "&" if "?" in path else "?"
-    return RedirectResponse(f"{path}{joiner}{query}" if query else path, status_code=303)
+    url = f"{path}{joiner}{query}" if query else path
+    return RedirectResponse(f"{url}#{fragment}" if fragment else url, status_code=303)
 
 
 def safe_back(back: str) -> str:
@@ -580,23 +583,22 @@ def recategorize(txn_id: int, category: str = Form(""), flow_type: str = Form("s
     """One row's category and flow, and optionally every row like it (Section 3)."""
     target = safe_back(back)
     if category and category not in categorize.CATEGORIES:
-        return RedirectResponse(f"{target}?error=Unknown+category", status_code=303)
+        return redirect(target, error="Unknown category")
     if flow_type not in categorize.FLOW_TYPES:
-        return RedirectResponse(f"{target}?error=Unknown+flow+type", status_code=303)
+        return redirect(target, error="Unknown flow type")
 
     with db.connect() as conn:
         changed, merchant = db.set_category(
             conn, txn_id, category or None, flow_type, bool(apply_all))
         if not changed:
-            return RedirectResponse(f"{target}?error=No+such+transaction", status_code=303)
+            return redirect(target, error="No such transaction")
         # The memory entry moved, so anything resolving through it re-resolves.
         db.recategorize_all(conn)
         conn.commit()
 
     others = changed - 1
     note = f"Categorized{f' and applied to {others} matching row(s)' if others else ''}"
-    return RedirectResponse(f"{target}?notice={note.replace(' ', '+')}#t{txn_id}",
-                            status_code=303)
+    return redirect(target, fragment=f"t{txn_id}", notice=note)
 
 
 @app.get("/months", response_class=HTMLResponse)
