@@ -263,11 +263,15 @@ def sanity_checks(stmt: dict, result: Result) -> None:
 
 def merge(pages: list[dict]) -> dict:
     """Concatenate transactions; take each summary field from the first page that has it."""
-    out: dict = {"transactions": []}
+    out: dict = {"transactions": [], "_card_openings": [], "_card_closings": []}
     scalars = ["issuer", "account_last4", "statement_period_start", "statement_period_end",
                "currency", "opening_balance", "closing_balance", "total_debits", "total_credits"]
     for p in pages:
         out["transactions"].extend(p.get("transactions", []))
+        # Per-card balances, which a consolidated statement prints one set of
+        # per section and pages apart. Concatenated here, combined by process().
+        for k in ("_card_openings", "_card_closings"):
+            out[k].extend(p.get(k, []))
         for k in scalars:
             if out.get(k) is None and p.get(k) is not None:
                 out[k] = p[k]
@@ -316,6 +320,11 @@ def process(path: Path, passwords: dict, dry_run: bool) -> Result:
     ]
 
     stmt = merge(extracted)
+    sections, openings = rows.combine_card_sections(stmt)
+    if sections > 1 and openings != sections:
+        r.warnings.append(
+            f"{sections} card sections but {openings} opening balance(s) — the "
+            f"balances could not be combined, so nothing checks these rows")
     ambiguous = sum(p.pop("_ambiguous_rows", 0) for p in extracted)
     if ambiguous:
         r.warnings.append(

@@ -208,6 +208,21 @@ SUMMARY_LABELS: list[tuple[str, str]] = [
 ]
 SUMMARY_RE = [(field, re.compile(pat, re.I)) for field, pat in SUMMARY_LABELS]
 
+# One document can bill several cards. UOB prints each as its own section — card
+# name, its own PREVIOUS BALANCE, its rows, then "TOTAL BALANCE FOR <card name>"
+# — and every section's transactions belong to the same statement. First-label-
+# wins then checks one card's balances against every card's rows, which fails a
+# flawless extraction: uob-1-2025 read all 79 rows correctly and still reported
+# "balance off by 287.86", because both balances came off the AMEX section while
+# the rows came off both it and the One Card section below.
+#
+# This is the label that marks a figure as one card's share, to be added to the
+# other sections' rather than to win the field outright. The label has to *name*
+# a card, which is what keeps it off DBS's "GRAND TOTAL FOR ALL CARD ACCOUNTS":
+# that one is already the sum, and adding it to its own parts would double the
+# statement.
+CARD_SECTION_TOTAL_RE = re.compile(r"(?i)^\s*total\s+balance\s+for\b")
+
 PERIOD_RE = re.compile(
     rf"""(?ix)
     (?:statement\s+period|statement\s+cycle|billing\s+cycle|period|statement\s+date|from)\D{{0,12}}
@@ -239,7 +254,24 @@ PERIOD_WRAPPED_RE = re.compile(
 )
 CYCLE_LABEL_RE = re.compile(r"(?i)statement\s+cycle|statement\s+period|billing\s+cycle")
 PERIOD_MAX_DAYS = 45      # a billing cycle is about a month; past this it is not one
-LAST4_RE = re.compile(r"(?:\*{2,}|x{4,}|X{4,}|•{2,})[\s-]*(\d{4})\b")
+# The last four digits of the card, from a masked number, or — failing that —
+# from a full one printed in groups of four. UOB heads its transaction pages
+# with the unmasked number ("4111-1111-1111-6037ALEX TAN") and normally also
+# prints a masked one in the front-page summary, but not on every statement: the
+# final cycle of a replaced card prints no summary at all, so the masked pattern
+# alone found nothing and that statement was filed as a third, nameless UOB card
+# — splitting one card's history into two accounts and marking every month in
+# the report part-billed.
+#
+# The separators are what make the second alternative safe. Sixteen consecutive
+# digits also sit inside every "Ref No. : 74100000000000000000123", and the last
+# four of a reference are not a card number; requiring the groups to be written
+# apart is what keeps this off them. The trailing digit is excluded rather than
+# using \b, because the name runs straight into the number with no boundary
+# between them.
+LAST4_RE = re.compile(
+    r"(?:\*{2,}|x{4,}|X{4,}|•{2,})[\s-]*(?P<masked>\d{4})\b"
+    r"|\d{4}[- ]\d{4}[- ]\d{4}[- ](?P<grouped>\d{4})(?!\d)")
 CURRENCY_RE = re.compile(r"\b(SGD|USD|EUR|GBP|AUD|JPY|MYR|HKD)\b")
 YEAR_RE = re.compile(r"\b(20[1-4]\d)\b")
 
@@ -579,6 +611,47 @@ def _summary_field(text: str, anchored: bool = False) -> str | None:
     return None
 
 
+def _summary_figure(amount: Decimal, direction: str, field: str) -> Decimal:
+    """A summary figure with its CR marker honoured, where the marker means something.
+
+    A *balance* is a position: UOB's "3.47CR" is money the bank owes the
+    cardholder, and kept as +3.47 it rolls the statement forward in the wrong
+    direction — out by twice the balance. `parse_amount` has read the marker all
+    along for transaction rows; the summary path was dropping it.
+
+    A *total* is a movement, and a marker there only restates the direction its
+    own label already gives ("TOTAL PAYMENTS ... CR"). Negating that would turn
+    the printed-totals check (Rule 1) into a guaranteed FAIL, so it is left
+    alone: this applies to the two balances only.
+    """
+    if direction == "credit" and field.endswith("_balance"):
+        return -amount
+    return amount
+
+
+def combine_card_sections(stmt: dict) -> tuple[int, int]:
+    """Add up the per-card balances of a statement that bills more than one card.
+
+    Returns (sections, openings) — what was found, so the caller can say so.
+
+    Below two sections there is nothing to combine and the figures are left
+    exactly as first-label-wins claimed them, which is why every single-card
+    statement reads the same after this as before it.
+    """
+    closings = [Decimal(v) for v in stmt.pop("_card_closings", [])]
+    openings = [Decimal(v) for v in stmt.pop("_card_openings", [])]
+    if len(closings) < 2:
+        return len(closings), len(openings)
+
+    stmt["closing_balance"] = str(sum(closings))
+    # One opening per section, or no figure at all. Summing fewer openings than
+    # there are cards is a balance short by a whole card and would reconcile to
+    # nothing; the honest answer is then UNVERIFIED, which says the app cannot
+    # check these rows rather than claiming they are wrong.
+    stmt["opening_balance"] = str(sum(openings)) if len(openings) == len(closings) else None
+    return len(closings), len(openings)
+
+
 def _description_below(lines: list[str], i: int, lookahead: int = 2) -> str:
     """Merchant text on the line(s) under a bare date/date/amount row."""
     for j in range(i + 1, min(i + 1 + lookahead, len(lines))):
@@ -723,6 +796,10 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
         "currency": None, "opening_balance": None, "closing_balance": None,
         "total_debits": None, "total_credits": None,
         "transactions": [], "_ambiguous_rows": 0,
+        # Every card section's own balances, in the order they are printed.
+        # Kept alongside the fields themselves because the fields can only hold
+        # one card's figure and a consolidated statement has several.
+        "_card_openings": [], "_card_closings": [],
     }
 
     lines = text.splitlines()
@@ -741,7 +818,7 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
 
     m = LAST4_RE.search(text)
     if m:
-        out["account_last4"] = m.group(1)
+        out["account_last4"] = m.group("masked") or m.group("grouped")
     m = CURRENCY_RE.search(text)
     if m:
         out["currency"] = m.group(1)
@@ -795,7 +872,7 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
                 # summary row, not a purchase. Only the figure is withheld,
                 # and for the same reason as the undated case below.
                 if out[field] is None and not ambiguous:
-                    out[field] = str(amount)
+                    out[field] = str(_summary_figure(amount, direction, field))
                 continue
 
             day, month, year = dates[0]
@@ -845,7 +922,7 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
 
         # No leading date: candidate summary row.
         field = _summary_field(line)
-        if field and out[field] is None:
+        if field:
             parsed = parse_amount(line)
             # A summary label followed by more than one figure is a row of a
             # multi-column table, not a labelled value, and "the last number"
@@ -859,7 +936,17 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
             # or read_summary_grid() below, supplies the figure from a source
             # that does say.
             if parsed and not parsed[3]:
-                out[field] = str(parsed[0])
+                figure = str(_summary_figure(parsed[0], parsed[1], field))
+                # Collected even when the field is already filled: on a
+                # consolidated statement it is precisely the sections after the
+                # first whose figures first-wins throws away, and those are the
+                # ones combine_card_sections needs to add up.
+                if field == "opening_balance":
+                    out["_card_openings"].append(figure)
+                elif CARD_SECTION_TOTAL_RE.match(line):
+                    out["_card_closings"].append(figure)
+                if out[field] is None:
+                    out[field] = figure
 
     read_summary_grid(lines, out)
     return out
