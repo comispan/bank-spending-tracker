@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Cards{% endblock %}
+{% block content %}
+
+<h1>Cards</h1>
+<p class="hint">
+  One row per card the statements were billed to. When a bank replaces a card —
+  reissued after fraud, renewed on expiry, upgraded — the new number arrives
+  here as a new card, because nothing in the statement says the two are the same
+  card. Saying so below folds them into one line on
+  <a href="/months">Months</a> and <a href="/analytics">Analytics</a>.
+</p>
+<p class="hint">
+  <strong>This is not cosmetic.</strong> A month counts as complete only when
+  every card is billed for all of it, so an unlinked replacement leaves a card
+  missing from every month — the one that stopped, or the one that had not
+  started — and takes the like-for-like comparison and the trailing average
+  with it.
+</p>
+<p class="hint">
+  <strong>It changes labels, not data.</strong> Each statement stays on the card
+  that actually billed it, no transaction moves, and unlinking puts both cards
+  back on the timeline exactly as they were.
+</p>
+
+{% if not cards %}
+  <p class="empty">No statements uploaded yet.</p>
+{% else %}
+<div class="gridwrap">
+<table class="cards">
+  <thead>
+    <tr>
+      <th>Card</th><th class="num">Statements</th><th class="num">Rows</th>
+      <th>Covers</th><th>Replaced by</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in cards %}
+    <tr>
+      <td>
+        <a href="/transactions?account={{ c.id }}">{{ c.label }}</a>
+        {% if c.lineage_size > 1 %}
+          <div class="muted">{{ c.lineage_label }}</div>
+        {% endif %}
+      </td>
+      <td class="num">{{ c.statements }}</td>
+      <td class="num">{{ c.rows_total }}</td>
+      <td>
+        {% if c.covered_from %}{{ c.covered_from }} → {{ c.covered_through }}
+        {% else %}<span class="muted">nothing datable</span>{% endif %}
+      </td>
+      <td>
+        <form method="post" action="/cards/replace" class="cardlink">
+          <input type="hidden" name="card" value="{{ c.id }}">
+          <select name="replaced_by" aria-label="Replaced by">
+            <option value="">— still in use —</option>
+            {% for other in cards %}
+              {% if other.id != c.id and other.issuer == c.issuer %}
+                <option value="{{ other.id }}"
+                        {% if other.id == c.replaced_by_id %}selected{% endif %}>
+                  {{ other.label }}
+                </option>
+              {% endif %}
+            {% endfor %}
+          </select>
+          <button type="submit" class="tiny">Save</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="hint">
+  Only cards from the same bank are offered: a reissue stays at the same
+  issuer. Link the <em>old</em> card to the new one — the newest number is the
+  one the reports are named by.
+</p>
+{% endif %}
+
+{% endblock %}

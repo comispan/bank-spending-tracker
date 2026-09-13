@@ -185,11 +185,17 @@ def dec(v) -> Decimal | None:
 
 def merge(pages: list[dict]) -> dict:
     """Concatenate transactions; take each summary field from the first page that has it."""
-    out: dict = {"transactions": []}
+    out: dict = {"transactions": [], "_card_openings": [], "_card_closings": []}
     scalars = ["issuer", "account_last4", "statement_period_start", "statement_period_end",
                "currency", "opening_balance", "closing_balance", "total_debits", "total_credits"]
     for page in pages:
         out["transactions"].extend(page.get("transactions", []))
+        # A card section's balances are not a scalar to be won once: a
+        # consolidated statement prints a set of them, and the sections can sit
+        # pages apart (uob-1-2025 closes its AMEX card on page 1 and its One
+        # Card on page 5). Concatenated here, combined by the caller.
+        for key in ("_card_openings", "_card_closings"):
+            out[key].extend(page.get(key, []))
         for key in scalars:
             if out.get(key) is None and page.get(key) is not None:
                 out[key] = page[key]
@@ -313,6 +319,14 @@ def parse(path: Path, filename: str, password: str | None = None) -> ParseResult
             f"column may have been read as the transaction amount")
 
     stmt = merge(extracted)
+    # A statement that bills several cards states each card's balances
+    # separately; the rows of all of them are about to be reconciled together,
+    # so the balances have to be added up first.
+    sections, openings = rows.combine_card_sections(stmt)
+    if sections > 1 and openings != sections:
+        result.warnings.append(
+            f"{sections} card sections but {openings} opening balance(s) — the "
+            f"balances could not be combined, so nothing checks these rows")
     result.statement = stmt
     result.transactions = stmt["transactions"]
     reconcile(stmt, result)

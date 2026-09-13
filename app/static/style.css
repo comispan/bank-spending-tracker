@@ -255,6 +255,43 @@ td.actions form { display: inline; }
        min-width: 1px; }
 .bar.unknown { background: var(--warn); }
 
+/* The month picker. It sets what every figure below is about, so it sits in a
+   panel above them rather than in a fold — and the chips are the months
+   themselves, checkboxes styled up, so it works with no script and the URL it
+   produces is the whole of its state. */
+.monthpick { margin: 1rem 0 1.25rem; padding: .75rem .9rem;
+             border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.pickhead { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+            margin-bottom: .55rem; font-size: .9rem; }
+.pickhead .muted { font-size: .8rem; }
+.yearrow { display: flex; align-items: center; gap: .3rem; flex-wrap: wrap;
+           padding: .15rem 0; }
+.yearpick { font-variant-numeric: tabular-nums; font-size: .78rem; color: var(--muted);
+            text-decoration: none; min-width: 2.8rem; }
+.yearpick:hover { color: var(--accent); text-decoration: underline; }
+/* One year control, not two: the box where it works, the link where it cannot.
+   The row keeps its left edge either way, so the months stay in a column. */
+.monthpick .yearchip { display: none; }
+/* Squared off and a fixed width: it reads as the row's spine rather than a
+   thirteenth month, and every row's months then start on the same line. */
+.monthpick.js .yearchip { display: inline-flex; margin-right: .35rem;
+                          border-radius: 5px; min-width: 4.3rem; }
+.monthpick.js .yearpick { display: none; }
+.monthpick .chip {
+  display: inline-flex; align-items: center; gap: .3rem; cursor: pointer;
+  padding: .12rem .45rem; border: 1px solid var(--line); border-radius: 999px;
+  font-size: .8rem; font-variant-numeric: tabular-nums; color: var(--muted);
+}
+.monthpick .chip input { margin: 0; accent-color: var(--accent); }
+.monthpick .chip:hover { border-color: var(--accent); }
+/* Selected is the state the reader scans for, so it carries weight and colour
+   and not just a ticked box two shades off the background. */
+.monthpick .chip:has(input:checked) { color: var(--ink); font-weight: 600;
+                                      border-color: var(--accent); background: var(--pass-bg); }
+.pickactions { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap;
+               margin-top: .6rem; }
+.picklinks { font-size: .8rem; color: var(--muted); display: flex; gap: .8rem; flex-wrap: wrap; }
+
 /* Analytics — the month breakdowns laid out across every complete month. A
    dense numeric grid: months read left to right, the peak month in each row is
    marked, and it scrolls inside its own box rather than widening the page. */
@@ -416,3 +453,8 @@ td.credit { color: var(--pass); }
 .outlets ul { list-style: none; margin: .3rem 0 .2rem; padding: 0 0 0 1rem; }
 .outlets li { display: flex; gap: .6rem; padding: .1rem 0; }
 .outlets .num { font-variant-numeric: tabular-nums; }
+/* Cards: the select and its save button sit on one line inside the row. */
+.cardlink { display: flex; gap: .45rem; align-items: center; }
+.cardlink select { max-width: 12rem; }
+table.cards td { vertical-align: middle; }
+table.cards .muted { font-size: .78rem; }

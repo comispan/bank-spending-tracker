@@ -26,8 +26,8 @@ merchant normalization and the three categorization tiers (Section 3), and the m
 report with drill-through, the month-on-month delta and the coverage window (Section 4).
 
 Since then, mostly volume and the things volume broke: bulk upload for a whole folder,
-a paginated transactions list, an analytics page across every complete month, merchant
-groups so a company's outlets read as one line, the card-coverage timeline, and
+a paginated transactions list, an analytics page across whichever complete months you pick,
+merchant groups so a company's outlets read as one line, the card-coverage timeline, and
 deploy scripts for a single-user tunnel-only instance ([deploy/README.md](deploy/README.md)).
 
 **The corpus is now 40 statements across 5 cards — 1,556 rows over 8 months.** All 40 pass

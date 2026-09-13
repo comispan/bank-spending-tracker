@@ -12,6 +12,7 @@ import json
 import math
 import sqlite3
 from collections import Counter
+from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,22 @@ CREATE TABLE IF NOT EXISTS account (
     last4       TEXT,
     nickname    TEXT,
     currency    TEXT NOT NULL DEFAULT 'SGD',
+    -- The card that took over from this one: reissued after fraud, renewed on
+    -- expiry, upgraded to another product. The statements stay on the card that
+    -- actually billed them and nothing here moves a transaction — only the
+    -- reports fold the chain into one card, exactly the way merchant_group
+    -- folds a company's outlets into one line.
+    --
+    -- Worth a column because the alternative is not "two rows on a chart". A
+    -- month is only complete when every card is billed for all of it, so a
+    -- replacement reads as one card that stops dead in August and another that
+    -- did not exist before September — and every month in the report then has
+    -- a card missing and no comparable window. On the real corpus that was all
+    -- 21 months.
+    --
+    -- Always the *current* card, never a middle link: `set_card_replacement`
+    -- flattens a chain on write, so resolving a lineage is one hop.
+    replaced_by_id INTEGER REFERENCES account(id),
     UNIQUE (issuer, last4)
 );
 
@@ -183,6 +200,7 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("statement", "statement_date TEXT"),
     ("txn", "reference TEXT"),
     ("txn", "amount_ambiguous INTEGER NOT NULL DEFAULT 0"),
+    ("account", "replaced_by_id INTEGER REFERENCES account(id)"),
 ]
 
 
@@ -798,8 +816,15 @@ def transaction_page(conn: sqlite3.Connection, *, uncategorized: bool = False,
         clauses.append("t.category = ?")
         args.append(category)
     if account:
-        clauses.append("t.account_id = ?")
-        args.append(account)
+        # A replaced card and its successor are one card, so drilling through
+        # from a report row shows the whole history — the report added those
+        # rows together, and a list that dropped half of them would not
+        # reconcile against the figure it was reached from. Filtering to a
+        # replaced card directly still shows that card alone: it is named by
+        # its own id, and nothing points at it.
+        clauses.append(
+            "t.account_id IN (SELECT id FROM account WHERE id = ? OR replaced_by_id = ?)")
+        args += [account, account]
     if merchant:
         clauses.append("t.merchant_normalized = ?")
         args.append(merchant)
@@ -863,16 +888,172 @@ def coverage(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def card_label(issuer: str, last4: str | None) -> str:
+    """How one card is named everywhere it is shown: `UOB ····6037`."""
+    return f'{issuer}{" ····" + last4 if last4 else ""}'
+
+
+def card_lineages(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+    """Every account, resolved to the card it is part of today.
+
+    Keyed by account id — including the replaced ones, which is the point: the
+    callers have an account id in hand (off a statement, a transaction, a link)
+    and need to know which card that belongs to now.
+
+    Each entry is the whole lineage: `head` is the current card's account id,
+    `members` every id in it oldest-numbered first, and `label` what to print —
+    the current card, with the cards it replaced named after it. Naming them is
+    what keeps the fold honest: `UOB ····4419 (was ····6037)` says both that
+    these are one card's history and that the older rows were billed to a
+    number that no longer exists.
+
+    Chains are followed rather than assumed to be one hop. `set_card_replacement`
+    flattens them on write, but a database edited by hand is not bound by that,
+    and a lineage that silently split in two would be indistinguishable from the
+    bug this whole column exists to fix. A cycle stops at the card it started
+    from instead of hanging.
+    """
+    by_id = {r["id"]: dict(r) for r in conn.execute(
+        "SELECT id, issuer, last4, replaced_by_id FROM account")}
+
+    def head_of(row: dict[str, Any]) -> dict[str, Any]:
+        seen = {row["id"]}
+        while row["replaced_by_id"] in by_id and row["replaced_by_id"] not in seen:
+            row = by_id[row["replaced_by_id"]]
+            seen.add(row["id"])
+        return row
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in by_id.values():
+        grouped.setdefault(head_of(row)["id"], []).append(row)
+
+    out: dict[int, dict[str, Any]] = {}
+    for head_id, group in grouped.items():
+        group.sort(key=lambda r: r["id"])
+        head = by_id[head_id]
+        was = [card_label(r["issuer"], r["last4"]) if not r["last4"] else "····" + r["last4"]
+               for r in group if r["id"] != head_id]
+        label = card_label(head["issuer"], head["last4"])
+        if was:
+            label += f" (was {', '.join(was)})"
+        entry = {"head": head_id, "label": label, "members": [r["id"] for r in group]}
+        for r in group:
+            out[r["id"]] = entry
+    return out
+
+
+def card_options(conn: sqlite3.Connection) -> dict[str, int]:
+    """Card label -> the account id to filter transactions by (the current card).
+
+    One entry per lineage: every member shares a label, so the replaced cards
+    collapse into their successor rather than offering a second link to a slice
+    of the same card's history.
+    """
+    return {e["label"]: e["head"] for e in card_lineages(conn).values()}
+
+
+def set_card_replacement(conn: sqlite3.Connection, account_id: int,
+                         replaced_by_id: int | None) -> str:
+    """Say that one card was replaced by another, or undo it. Returns why not, or "".
+
+    Rejections are the useful part. A card cannot replace itself, cannot replace
+    a card at another issuer (a reissue stays at the same bank; anything else is
+    a mistyped dropdown), and cannot be the replacement for a card that already
+    replaces it, which would make a loop that no report could resolve.
+
+    On success the link is flattened: `account_id` is pointed at the *current*
+    card rather than at whatever middle link was picked, and any card already
+    pointing at `account_id` is moved along with it. That is what lets every
+    reader resolve a lineage in one hop, and it means linking three cards in any
+    order ends up in the same place.
+    """
+    ids = {r["id"]: dict(r) for r in conn.execute(
+        "SELECT id, issuer, replaced_by_id FROM account")}
+    if account_id not in ids:
+        return "No such card"
+    if replaced_by_id is None:
+        conn.execute("UPDATE account SET replaced_by_id = NULL WHERE id = ?", (account_id,))
+        return ""
+    if replaced_by_id not in ids:
+        return "No such card"
+    if replaced_by_id == account_id:
+        return "A card cannot replace itself"
+    if ids[account_id]["issuer"] != ids[replaced_by_id]["issuer"]:
+        return "A replacement card is issued by the same bank"
+
+    lineages = card_lineages(conn)
+    head = lineages[replaced_by_id]["head"]
+    if head == account_id:
+        return "That card is already part of this one's history"
+    conn.execute("UPDATE account SET replaced_by_id = ? WHERE id = ? OR replaced_by_id = ?",
+                 (head, account_id, account_id))
+    return ""
+
+
+def card_list(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every card that has statements, with what it covers and who it belongs to.
+
+    The /cards screen, and deliberately one row per *account* rather than per
+    lineage: linking two cards is a statement about two specific cards, so both
+    have to be visible to be linked and to be told apart afterwards.
+    """
+    lineages = card_lineages(conn)
+    windows = {}
+    per_account: dict[int, list[dict[str, Any]]] = {}
+    for r in conn.execute(
+        """SELECT a.id, s.period_start, s.period_end, s.statement_date,
+                  (SELECT MIN(txn_date) FROM txn WHERE statement_id = s.id) AS first_txn
+           FROM statement s JOIN account a ON a.id = s.account_id"""
+    ):
+        per_account.setdefault(r["id"], []).append(dict(r))
+    for account_id, rows_ in per_account.items():
+        w = months.statement_windows(rows_)
+        windows[account_id] = (w[0][0], w[-1][1]) if w else (None, None)
+
+    out = []
+    for r in conn.execute(
+        """SELECT a.id, a.issuer, a.last4, a.replaced_by_id,
+                  COUNT(DISTINCT s.id) AS statements,
+                  (SELECT COUNT(*) FROM txn WHERE account_id = a.id) AS rows_total
+             FROM account a LEFT JOIN statement s ON s.account_id = a.id
+            GROUP BY a.id ORDER BY a.issuer, a.last4"""
+    ):
+        lineage = lineages[r["id"]]
+        covered = windows.get(r["id"], (None, None))
+        out.append({
+            "id": r["id"],
+            "label": card_label(r["issuer"], r["last4"]),
+            "issuer": r["issuer"],
+            "statements": r["statements"],
+            "rows_total": r["rows_total"],
+            "covered_from": covered[0],
+            "covered_through": covered[1],
+            "replaced_by_id": r["replaced_by_id"],
+            "lineage_label": lineage["label"],
+            "is_head": lineage["head"] == r["id"],
+            "lineage_size": len(lineage["members"]),
+        })
+    return out
+
+
 def coverage_by_account(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
-    """Merged covered windows per card, keyed by a human label."""
+    """Merged covered windows per card, keyed by a human label.
+
+    Keyed by *lineage*, so a card and the card that replaced it are one row on
+    the timeline and one card in the completeness count. Grouping the statements
+    before the windows are built, rather than merging the windows afterwards,
+    is what closes the seam between the two cards: `statement_windows` infers a
+    missing period start from the previous statement's end, and across a
+    replacement the previous statement is the old card's last one.
+    """
+    lineages = card_lineages(conn)
     per_account: dict[str, list[dict[str, Any]]] = {}
     for r in conn.execute(
         """SELECT a.id, a.issuer, a.last4, s.period_start, s.period_end, s.statement_date,
                   (SELECT MIN(txn_date) FROM txn WHERE statement_id = s.id) AS first_txn
            FROM statement s JOIN account a ON a.id = s.account_id"""
     ):
-        label = f'{r["issuer"]}{" ····" + r["last4"] if r["last4"] else ""}'
-        per_account.setdefault(label, []).append(dict(r))
+        per_account.setdefault(lineages[r["id"]]["label"], []).append(dict(r))
     return {label: months.statement_windows(rows_) for label, rows_ in per_account.items()}
 
 
@@ -1048,6 +1229,23 @@ def month_notable(conn: sqlite3.Connection, ym: str, trailing: list[str],
     return {"new_merchants": new_merchants, "hot_categories": hot}
 
 
+def _fold_cards(rows_: list[sqlite3.Row], names: dict[int, str]) -> list[dict[str, Any]]:
+    """Per-account (label, n, v) rows, added up under their lineage label.
+
+    Added up rather than renamed one by one: a card and the card that replaced
+    it are two accounts and one card, so their months belong in one row. Ordered
+    by value like the query it replaces, since folding two rows into one can
+    move it up the page.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows_:
+        label = names.get(r["label"], str(r["label"]))
+        entry = out.setdefault(label, {"label": label, "n": 0, "v": 0})
+        entry["n"] += r["n"]
+        entry["v"] += r["v"]
+    return sorted(out.values(), key=lambda e: -e["v"])
+
+
 def month_detail(conn: sqlite3.Connection, ym: str) -> dict[str, Any]:
     """Category, card and merchant breakdown for one calendar month.
 
@@ -1070,14 +1268,18 @@ def month_detail(conn: sqlite3.Connection, ym: str) -> dict[str, Any]:
                                         ELSE 0 END), 0) AS v
                FROM txn t WHERE t.txn_date BETWEEN ? AND ?
                GROUP BY 1 ORDER BY v DESC"""),
-        "by_card": rows_for(
-            """SELECT a.issuer || CASE WHEN a.last4 IS NULL THEN '' ELSE ' ····' || a.last4 END
-                        AS label, COUNT(*) AS n,
-                      COALESCE(SUM(CASE WHEN t.flow_type='spend' THEN t.amount_sgd_minor
-                                        WHEN t.flow_type='refund' THEN -t.amount_sgd_minor
-                                        ELSE 0 END), 0) AS v
-               FROM txn t JOIN account a ON a.id = t.account_id
-               WHERE t.txn_date BETWEEN ? AND ? GROUP BY 1 ORDER BY v DESC"""),
+        # Grouped by account and named by lineage — the same fold the month's
+        # own completeness uses, and it has to be the same one: the page looks
+        # the coverage badge and the drill-through link up by this label, and a
+        # row named for a card that was replaced would match neither.
+        "by_card": _fold_cards(
+            rows_for(
+                """SELECT t.account_id AS label, COUNT(*) AS n,
+                          COALESCE(SUM(CASE WHEN t.flow_type='spend' THEN t.amount_sgd_minor
+                                            WHEN t.flow_type='refund' THEN -t.amount_sgd_minor
+                                            ELSE 0 END), 0) AS v
+                   FROM txn t WHERE t.txn_date BETWEEN ? AND ? GROUP BY 1"""),
+            {account_id: e["label"] for account_id, e in card_lineages(conn).items()}),
         "by_merchant": _attach_members(
             [dict(r) for r in rows_for(
                 f"""SELECT {_GLABEL} AS label, COUNT(*) AS n,
@@ -1157,8 +1359,9 @@ def _pivot(rows: list[sqlite3.Row], months: list[str], top: int | None = None) -
     return out
 
 
-def analytics(conn: sqlite3.Connection) -> dict[str, Any]:
-    """The month report's breakdowns, but across every *complete* month at once.
+def analytics(conn: sqlite3.Connection,
+              selected: Sequence[str] | None = None) -> dict[str, Any]:
+    """The month report's breakdowns, but across several *complete* months at once.
 
     A complete month is one where every card is billed for the whole of it
     (`months.month_completeness`). Only those are compared: a part-billed month
@@ -1166,9 +1369,18 @@ def analytics(conn: sqlite3.Connection) -> dict[str, Any]:
     face to say it is short, and every trend read off the grid would be wrong.
     The months left out are listed with the reason, so the page is honest about
     its own scope rather than just showing fewer columns.
+
+    `selected` narrows that to a chosen subset — a year, a quarter, before and
+    after a move — and is intersected with the complete months rather than
+    trusted: a month the caller names that is part-billed or absent would put
+    exactly the short column back that the completeness rule exists to keep out.
+    `available` is always the full eligible set, so the caller can offer the
+    choice (and widen a selection that has narrowed to nothing) either way.
     """
     report = month_report(conn)          # newest first, each with completeness
-    months = sorted(m["month"] for m in report if m["is_complete"])
+    available = sorted(m["month"] for m in report if m["is_complete"])
+    months = ([ym for ym in available if ym in set(selected)]
+              if selected is not None else list(available))
 
     excluded = []
     for m in report:
@@ -1188,7 +1400,8 @@ def analytics(conn: sqlite3.Connection) -> dict[str, Any]:
     excluded.sort(key=lambda e: e["month"])
 
     if len(months) < 2:
-        return {"months": months, "excluded": excluded, "enough": False}
+        return {"months": months, "available": available, "excluded": excluded,
+                "filtered": selected is not None, "enough": False}
 
     marks = ",".join("?" * len(months))
 
@@ -1199,18 +1412,28 @@ def analytics(conn: sqlite3.Connection) -> dict[str, Any]:
     spends = [s["spend"] for s in series]
 
     def grid(label_sql: str, join: str = "", where: str = "", top: int | None = None,
-             value: str = _SPEND):
-        return _pivot(conn.execute(
+             value: str = _SPEND, relabel: dict[Any, str] | None = None):
+        rows_ = conn.execute(
             f"""SELECT {label_sql} AS label, substr(t.txn_date, 1, 7) AS ym,
                        COALESCE(SUM({value}), 0) AS v, COUNT(*) AS n
                 FROM txn t {join}
                 WHERE substr(t.txn_date, 1, 7) IN ({marks}) {where}
-                GROUP BY 1, 2""", months).fetchall(), months, top)
+                GROUP BY 1, 2""", months).fetchall()
+        # Renamed before the pivot, never after: a label two SQL groups both map
+        # to — a card and the card that replaced it — has to be one row with
+        # their months added together, which only happens if the aggregation
+        # sees the final name.
+        if relabel:
+            rows_ = [dict(r, label=relabel.get(r["label"], r["label"])) for r in rows_]
+        return _pivot(rows_, months, top)
 
-    card_label = ("a.issuer || CASE WHEN a.last4 IS NULL THEN '' "
-                  "ELSE ' ····' || a.last4 END")
+    # Grouped by account and named by lineage, so a card that was replaced is
+    # one row with its successor rather than two half-length ones.
+    card_names = {account_id: e["label"] for account_id, e in card_lineages(conn).items()}
     return {
         "months": months,
+        "available": available,
+        "filtered": months != available,
         "excluded": excluded,
         "enough": True,
         "series": series,
@@ -1222,7 +1445,7 @@ def analytics(conn: sqlite3.Connection) -> dict[str, Any]:
         # row of dots in a grid, so drop it here.
         "by_category": [r for r in grid("COALESCE(t.category, '(uncategorized)')")
                         if r["total"] > 0],
-        "by_card": grid(card_label, join="JOIN account a ON a.id = t.account_id"),
+        "by_card": grid("t.account_id", relabel=card_names),
         # By company where outlets are grouped, with the outlets on `members`
         # for the drill-down — the same shape the month page uses.
         "by_merchant": _attach_members(

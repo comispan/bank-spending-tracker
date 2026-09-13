@@ -5,28 +5,123 @@
 
 <h1>Analytics</h1>
 <p class="hint">
-  Every <strong>complete</strong> month, side by side — the same breakdowns the
-  individual month page shows, but across the whole run. A month counts as
-  complete only when every card is billed for all of it; the part-billed ones
-  are left out and named below, because a short month dropped into a
-  category-by-month grid is a low column with nothing on its face to say so.
+  Complete months side by side — the same breakdowns the individual month page
+  shows, but across as many months as you choose. A month counts as complete
+  only when every card is billed for all of it; the part-billed ones are never
+  on offer, because a short month dropped into a category-by-month grid is a
+  low column with nothing on its face to say so.
 </p>
+
+{# ---------- which months the whole page is about ---------------------------
+
+   A GET form, so the chosen window is the URL: every figure below is a slice
+   of it, and a window worth reading twice is worth linking to. Shown even when
+   the current pick is too narrow to compare — that is exactly when the reader
+   needs it, to widen the selection again. #}
+{% if a.available | length > 1 %}
+<form class="monthpick" method="get" action="/analytics">
+  <div class="pickhead">
+    <strong>Months compared</strong>
+    <span class="muted">
+      {{ a.months | length }} of {{ a.available | length }} complete
+      month{{ 's' if a.available | length != 1 }}
+      {%- if a.excluded %}, {{ a.excluded | length }} not eligible{% endif %}
+    </span>
+  </div>
+  {% for year, yms in by_year(a.available) %}
+    {% set on = yms | select('in', a.months) | list | length %}
+    <div class="yearrow">
+      {# The year is a heading and a selection at once — for a run of any
+         length it is the window people ask for first. It carries no `name`, so
+         it never reaches the server: it only drives the month boxes beside it,
+         which are the actual answer. Without script it does nothing, so the
+         link is what a scriptless page gets instead. #}
+      <label class="chip yearchip">
+        <input type="checkbox" class="yearbox" aria-label="All of {{ year }}"
+               {{ 'checked' if on == yms | length }}>{{ year }}
+      </label>
+      <a class="yearpick" href="/analytics?{{ months_qs(yms) }}">{{ year }}</a>
+      {% for ym in yms %}
+        {# The year is on the row, so the chip shows the month alone; the label
+           read aloud has to carry it, or the box is an unqualified "01". #}
+        <label class="chip">
+          <input type="checkbox" name="month" value="{{ ym }}" aria-label="{{ ym }}"
+                 {{ 'checked' if ym in a.months }}>{{ ym[5:] }}
+        </label>
+      {% endfor %}
+    </div>
+  {% endfor %}
+  <div class="pickactions">
+    <button type="submit">Compare selected</button>
+    <span class="picklinks">
+      {% if a.filtered %}<a href="/analytics">all {{ a.available | length }}</a>{% endif %}
+      {% for k in [6, 12] %}
+        {% if a.available | length > k %}
+          <a href="/analytics?{{ months_qs(a.available[-k:]) }}">last {{ k }}</a>
+        {% endif %}
+      {% endfor %}
+    </span>
+  </div>
+</form>
+{# The year box is an all-or-none for its row, and a third state for the rows
+   that are neither — drawn by the browser, not by us, because `indeterminate`
+   cannot be set in markup. The whole control is script-only, so the class that
+   reveals it is set from here: a checkbox that silently does nothing is worse
+   than the link it replaces. #}
+<script>
+  (function () {
+    var form = document.querySelector('.monthpick');
+    if (!form) return;
+    form.classList.add('js');
+    form.querySelectorAll('.yearrow').forEach(function (row) {
+      var year = row.querySelector('.yearbox');
+      var months = row.querySelectorAll('input[name=month]');
+      if (!year || !months.length) return;
+      function sync() {
+        var n = 0;
+        months.forEach(function (m) { if (m.checked) n++; });
+        year.checked = n === months.length;
+        year.indeterminate = n > 0 && n < months.length;
+      }
+      year.addEventListener('change', function () {
+        months.forEach(function (m) { m.checked = year.checked; });
+        year.indeterminate = false;
+      });
+      months.forEach(function (m) { m.addEventListener('change', sync); });
+      sync();
+    });
+  })();
+</script>
+{% endif %}
 
 {% if not a.enough %}
   <p class="empty">
-    Nothing to compare yet — this needs at least two complete months and there
-    {{ 'is' if a.months | length == 1 else 'are' }} {{ a.months | length or 'none' }}.
+    {% if a.available | length > 1 %}
+      Pick at least two months — {{ a.months | length or 'none' }}
+      {{ 'is' if a.months | length == 1 else 'are' }} selected.
+    {% else %}
+      Nothing to compare yet — this needs at least two complete months and there
+      {{ 'is' if a.available | length == 1 else 'are' }} {{ a.available | length or 'none' }}.
+    {% endif %}
     {% if a.excluded %}
-      Waiting on:
+      {# Two different facts wear the same list: months that could still become
+         eligible, and months that are simply not on offer. Naming it wrong
+         makes the second look like a delay the reader should wait out. #}
+      {{ 'Not on offer:' if a.available | length > 1 else 'Waiting on:' }}
       {% for e in a.excluded %}<br>· <strong>{{ e.month }}</strong> — {{ e.why }}{% endfor %}
     {% endif %}
   </p>
 {% else %}
 
 <p class="hint">
-  {{ a.months | length }} complete months: {{ a.months | join(', ') }}.
+  {% if a.filtered %}
+    {{ a.months | length }} of {{ a.available | length }} complete months:
+  {% else %}
+    All {{ a.months | length }} complete months:
+  {% endif %}
+  {{ a.months | join(', ') }}.
   {% if a.excluded %}
-    Left out —
+    Never eligible —
     {% for e in a.excluded %}{{ e.month }} ({{ e.why }}){{ '; ' if not loop.last }}{% endfor %}.
   {% endif %}
 </p>

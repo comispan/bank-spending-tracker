@@ -446,6 +446,67 @@ def test_row_parsing() -> None:
                            ("2026-06-17", "2026-07-17"), 2026)
     check("grid: needs at least three columns", pair["opening_balance"] is None,
           repr(pair["opening_balance"]))
+    # The card number. Masked is the usual form, but the last statement on a
+    # replaced card can print none at all — only the unmasked number that heads
+    # the transaction pages, with the cardholder's name run straight into it.
+    # Missing that filed the statement as a nameless third UOB card and split
+    # one card's history across two accounts.
+    masked = rows.parse_page("     UOB ONE CARD ************6037 ALEX TAN" + "\n",
+                             ("2025-01-16", "2025-02-16"), 2025)
+    check("a masked card number gives the last four",
+          masked["account_last4"] == "6037", repr(masked["account_last4"]))
+    bare = rows.parse_page("     4111-1111-1111-6037ALEX TAN (continued)" + "\n",
+                           ("2025-01-16", "2025-02-16"), 2025)
+    check("...and so does an unmasked one with a name run into it",
+          bare["account_last4"] == "6037", repr(bare["account_last4"]))
+    # Sixteen consecutive digits also sit inside every reference. Requiring the
+    # groups to be written apart is the whole of what keeps this off them.
+    ref = rows.parse_page("                Ref No. : 74100000000000000000123" + "\n",
+                          ("2025-01-16", "2025-02-16"), 2025)
+    check("a reference number is not a card number",
+          ref["account_last4"] is None, repr(ref["account_last4"]))
+    # A consolidated statement bills several cards in one document, each its own
+    # section with its own PREVIOUS BALANCE and its own TOTAL BALANCE FOR line.
+    # Every section's rows are reconciled together, so the balances have to be
+    # added together too: taking the first section's pair checked one card
+    # against two cards' rows and failed uob-1-2025 by 287.86 with all 79 rows
+    # read correctly. Honouring the CR is the other half — a card in credit
+    # subtracts, and kept positive it is out by twice its own balance.
+    cards = rows.parse_page(
+        "                PREVIOUS BALANCE                              613.54" + "\n"
+        "     19 DEC 18 DEC PAYMENT AT AXS                           613.54CR" + "\n"
+        "                SUB TOTAL                                      3.47 CR" + "\n"
+        "                TOTAL BALANCE FOR ABSOLUTE CASHBACK AMEX       3.47CR" + "\n"
+        "                PREVIOUS BALANCE                                0.00" + "\n"
+        "     26 DEC 24 DEC GetGo Singapore                            939.22" + "\n"
+        "                TOTAL BALANCE FOR UOB ONE CARD                939.22" + "\n",
+        ("2024-12-16", "2025-01-15"), 2025)
+    check("a card in credit keeps its CR", cards["_card_closings"] == ["-3.47", "939.22"],
+          repr(cards["_card_closings"]))
+    check("both card sections are found", rows.combine_card_sections(cards) == (2, 2))
+    check("the statement balance is the cards added up",
+          (cards["opening_balance"], cards["closing_balance"]) == ("613.54", "935.75"),
+          repr((cards["opening_balance"], cards["closing_balance"])))
+
+    # The marker is honoured on a balance, never on a total: a total is a
+    # movement whose own label already gives the direction, and negating it
+    # would FAIL a perfect read against the printed totals.
+    tot = rows.parse_page("                TOTAL PAYMENTS                 617.01CR" + "\n",
+                          ("2024-12-16", "2025-01-15"), 2025)
+    check("a printed total keeps its sign", tot["total_credits"] == "617.01",
+          repr(tot["total_credits"]))
+
+    # A section whose opening balance did not come through is a statement the
+    # app cannot check: a sum short by one card's balance reconciles to nothing,
+    # so it claims no opening at all and the statement reports UNVERIFIED.
+    short = rows.parse_page(
+        "                PREVIOUS BALANCE                              613.54" + "\n"
+        "                TOTAL BALANCE FOR CARD A                       3.47CR" + "\n"
+        "                TOTAL BALANCE FOR CARD B                     939.22" + "\n",
+        ("2024-12-16", "2025-01-15"), 2025)
+    check("a card section short an opening claims no opening at all",
+          rows.combine_card_sections(short) == (2, 1) and short["opening_balance"] is None,
+          repr(short["opening_balance"]))
 
 
 def test_month_coverage() -> None:
@@ -1636,6 +1697,96 @@ def test_statement_sort() -> None:
           repr(set(main.SORT_FIRST_CLICK_DESC) ^ set(db.STATEMENT_ORDERS)))
 
 
+def test_card_lineage() -> None:
+    """`db.card_lineages` and friends — a replaced card and its successor as one card.
+
+    The bug this exists for is quiet and total: a bank reissues a card, the new
+    number arrives as a new card, and from then on every month in the report has
+    some card missing — the one that stopped or the one that had not started —
+    so no month is complete and nothing compares like for like. On the real
+    corpus that was all 21 months.
+    """
+    print("\ncard lineage")
+    import sqlite3
+    import db
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    conn.execute("INSERT INTO account (id, issuer, kind, last4) VALUES (1, 'UOB', 'credit', '6037')")
+    conn.execute("INSERT INTO account (id, issuer, kind, last4) VALUES (2, 'UOB', 'credit', '4419')")
+    conn.execute("INSERT INTO account (id, issuer, kind, last4) VALUES (3, 'DBS', 'credit', '2277')")
+    for i, (account, ps, pe) in enumerate([
+        (1, "2026-01-01", "2026-01-31"), (1, "2026-02-01", "2026-02-28"),
+        (2, None, "2026-03-31"), (2, "2026-04-01", "2026-04-30"),
+    ], start=1):
+        conn.execute(
+            """INSERT INTO statement (id, account_id, filename, file_sha256, storage_path,
+                                      period_start, period_end, page_count, parser_version,
+                                      status, verdict)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, 't', 'parsed', 'pass')""",
+            (i, account, f"s{i}.pdf", f"hash{i}", f"/s{i}", ps, pe))
+        conn.execute(
+            """INSERT INTO txn (id, account_id, statement_id, txn_date, description_raw,
+                                merchant_normalized, amount_minor, currency, amount_sgd_minor,
+                                direction)
+               VALUES (?, ?, ?, ?, 'SHOP', 'shop', 100, 'SGD', 100, 'debit')""",
+            (i, account, i, pe))
+
+    check("an unlinked card is its own lineage",
+          sorted(db.coverage_by_account(conn)) == ["UOB ····4419", "UOB ····6037"],
+          repr(sorted(db.coverage_by_account(conn))))
+
+    check("a card cannot replace itself",
+          db.set_card_replacement(conn, 1, 1) == "A card cannot replace itself")
+    check("a replacement comes from the same bank",
+          db.set_card_replacement(conn, 1, 3) == "A replacement card is issued by the same bank")
+    check("linking the old card to the new one is accepted",
+          db.set_card_replacement(conn, 1, 2) == "")
+
+    lineage = db.card_lineages(conn)
+    check("both cards resolve to the surviving one",
+          lineage[1]["head"] == 2 and lineage[2]["head"] == 2, repr(lineage[1]))
+    check("the label names the card it replaced",
+          lineage[1]["label"] == "UOB ····4419 (was ····6037)", lineage[1]["label"])
+
+    # The seam is the point. s3 prints no period start, so its window is
+    # inferred from the statement before it — which is on the *other* card, and
+    # only reachable because the statements are grouped before the windows are
+    # built rather than the windows merged afterwards.
+    cov = db.coverage_by_account(conn)
+    check("one card, one row on the timeline",
+          sorted(cov) == ["UOB ····4419 (was ····6037)"], repr(sorted(cov)))
+    check("and one unbroken window across the replacement",
+          cov["UOB ····4419 (was ····6037)"] == [("2026-01-01", "2026-04-30")],
+          repr(cov["UOB ····4419 (was ····6037)"]))
+
+    check("the current card's rows include the card it replaced",
+          db.transaction_page(conn, account=2, page=1)["total"] == 4,
+          db.transaction_page(conn, account=2, page=1)["total"])
+    check("the replaced card on its own still shows only its own rows",
+          db.transaction_page(conn, account=1, page=1)["total"] == 2,
+          db.transaction_page(conn, account=1, page=1)["total"])
+    check("one entry per lineage to filter by",
+          db.card_options(conn) == {"UOB ····4419 (was ····6037)": 2, "DBS ····2277": 3},
+          repr(db.card_options(conn)))
+
+    # A third card, linked to the middle of the chain rather than its head. The
+    # link is flattened so every reader still resolves a lineage in one hop.
+    conn.execute("INSERT INTO account (id, issuer, kind, last4) VALUES (4, 'UOB', 'credit', '9000')")
+    check("linking to a card that was itself replaced is accepted",
+          db.set_card_replacement(conn, 4, 1) == "")
+    check("...and is stored against the current card, not the middle link",
+          conn.execute("SELECT replaced_by_id FROM account WHERE id = 4").fetchone()[0] == 2)
+    check("a loop is refused",
+          db.set_card_replacement(conn, 2, 1) == "That card is already part of this one's history")
+
+    check("unlinking puts the card back on its own",
+          db.set_card_replacement(conn, 1, None) == ""
+          and db.card_lineages(conn)[1]["label"] == "UOB ····6037",
+          db.card_lineages(conn)[1]["label"])
+
+
 def test_transaction_page() -> None:
     """`db.transaction_page` — the paged all-transactions list.
 
@@ -1922,6 +2073,7 @@ if __name__ == "__main__":
     test_statement_sort()
     test_row_parse_notes()
     test_transaction_page()
+    test_card_lineage()
     test_analytics()
     test_cli_runs()
     test_reconciliation()
