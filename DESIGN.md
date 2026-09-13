@@ -70,8 +70,10 @@ Implemented in `spike/rows.py`; lift it into the app as-is. Page text with layou
 
 - **Peel up to two dates off the front** — transaction date and posting date. An inline year must be four digits: a two-digit year is indistinguishable from the day of the next date, and `27 JUN 28 JUN` collapsing to one date silently halves every issuer that prints both.
 - **Take the amount off the end**, with whatever signals direction — trailing `CR`/`DR`, leading `+`/`-`, accounting parentheses. Default debit; reconciliation contradicts it loudly if wrong.
+- **Read the card number masked or unmasked.** `************8251` is the usual form, but a statement need not print one: the final cycle of a replaced card carries no summary block at all, only the unmasked `4265-8840-8142-8251` heading the transaction pages with the cardholder's name run into it. Reading only the masked form filed that statement under a nameless third card. The groups must be written apart — sixteen consecutive digits also sit inside every `Ref No. : 74541835006288103325234`.
 - **Resolve the year once per document.** Only page 1 prints a period or a four-digit year; doing it per page discards every row after page one and looks exactly like a quiet month.
 - **Read summary figures from a narrow label list**, plus horizontal summary grids where figures sit in one row with labels stacked above (MariBank and Trust both do this). Take only opening and closing balance from a grid — MariBank splits one credit across two component columns, so lifting one into `total_credits` FAILs a correct extraction by 14 cents.
+- **Add up the card sections of a consolidated statement.** UOB bills two cards in one document — each its own section with its own `PREVIOUS BALANCE` and `TOTAL BALANCE FOR <card>` — and every section's rows are reconciled together, so letting the first label win checks one card's balances against all of the cards' rows: `uob-1-2025` read all 79 rows correctly and still FAILed by 287.86. The `CR` on a balance is the other half of it — a card in credit subtracts (`3.47CR` is −3.47), and kept positive it is out by twice its own balance. A printed *total* keeps its sign either way; its label already gives the direction.
 - **A dated row whose text opens with a summary label is not a transaction.** Trust rules its opening and closing balance into the table; counted as purchases they inflated debits from 115.82 to 1953.82.
 
 The output shape, unchanged from the original design:
@@ -520,6 +522,31 @@ itself billed or every remainder is a branch code. `royal plaza` and `royal
 sporting house` share a word and nothing else and are never proposed — that pair
 is the test the rule exists to fail. The user ticks what is right on
 `/merchants/groups`; nothing groups itself.
+
+**Replaced cards — added after the reports were live.** A bank reissues a card
+after fraud and the new number arrives as a new card: one lineage that stops
+dead in August, another that begins in September. Nothing in either statement
+says they are the same card. The cost is not an extra row on a chart — a month
+counts as complete only when *every* card is billed for all of it (trap 1), so
+from the reissue onwards some card is always missing and no month has a
+comparable window. On the real corpus that was all 21 months: every one
+part-billed, no like-for-like figure, no trailing average, and nothing on the
+page to say the cause was a card number rather than a missing statement.
+
+The fix has the same shape as merchant groups, one level up. `account.replaced_by_id`
+points a retired card at the card that took over, and only the *reports* fold
+the chain: each statement stays on the account that actually billed it, no
+transaction moves, and unlinking restores both cards exactly as they were. The
+label says both things at once — `UOB ····1208 (was ····8251)` — so a folded row
+can never read as a single number that was always billed to one card. Set on
+`/cards`, and never inferred: two cards at one bank with neatly adjacent cycles
+are just as likely to be two cards, and only the cardholder knows a reissue
+happened.
+
+Grouping the statements *before* the windows are built is what closes the seam
+between the two cards. `months.statement_windows` infers a missing period start
+from the previous statement's end, and across a replacement the previous
+statement is the old card's last one.
 
 That last one — **every number traces back to a page in a PDF** — is what makes users trust it. Store the page number and bounding box at extraction time; it costs nothing then and is impossible to reconstruct later.
 

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Form, Request, UploadFile
+from fastapi import FastAPI, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -123,10 +123,36 @@ def asset_version(name: str) -> str:
         return "0"
 
 
+def months_qs(months: list[str]) -> str:
+    """`month=2025-01&month=2025-02` — the analytics month picker as a link.
+
+    The picker is a GET form, so its state is already a repeated query
+    parameter; the preset links have to speak the same form or they would be a
+    second, divergent way of saying which months are on the page.
+    """
+    return urlencode([("month", ym) for ym in months])
+
+
+def by_year(months: list[str]) -> list[tuple[str, list[str]]]:
+    """Group `YYYY-MM` in order, so a long run of checkboxes has a spine.
+
+    Thirty bare months wrap into a wall no one reads. Broken into years, the
+    year is both the heading and the most likely selection anyone wants.
+    """
+    out: list[tuple[str, list[str]]] = []
+    for ym in months:
+        if not out or out[-1][0] != ym[:4]:
+            out.append((ym[:4], []))
+        out[-1][1].append(ym)
+    return out
+
+
 templates.env.filters["money"] = money
 templates.env.filters["money0"] = money0
 templates.env.filters["period"] = period
 templates.env.globals["asset_version"] = asset_version
+templates.env.globals["months_qs"] = months_qs
+templates.env.globals["by_year"] = by_year
 
 
 # ------------------------------------------------------------------- views
@@ -524,11 +550,12 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
             account=account, merchant=merchant, merchant_group=merchant_group,
             flow=flow, page=page)
         stats = db.coverage(conn)
-        account_name = conn.execute(
-            """SELECT issuer || CASE WHEN last4 IS NULL THEN '' ELSE ' ····' || last4 END
-                 AS label FROM account WHERE id = ?""", (account,)).fetchone() if account else None
+        # The lineage label, because the slice is the lineage: filtering to a
+        # card that replaced another shows both cards' rows, and the chip has
+        # to say so.
+        lineage = db.card_lineages(conn).get(account) if account else None
     active = [("month", month, month), ("category", category, category),
-              ("account", account, account_name["label"] if account_name else None),
+              ("account", account, lineage["label"] if lineage else None),
               ("merchant", merchant, merchant),
               # Named differently from `merchant` on purpose: a company row and
               # one of its outlets are different slices, and a filter chip that
@@ -631,9 +658,7 @@ def month_view(request: Request, ym: str):
             return RedirectResponse("/months?error=No+transactions+that+month", status_code=303)
         detail = db.month_detail(conn, ym)
         notable = db.month_notable(conn, ym, row["trailing_months"], row["comparable_days"])
-        cards = {r["label"]: r["id"] for r in conn.execute(
-            """SELECT id, issuer || CASE WHEN last4 IS NULL THEN '' ELSE ' ····' || last4 END
-                 AS label FROM account""")}
+        cards = db.card_options(conn)
     biggest = max((r["v"] for r in detail["by_category"]), default=0)
     return templates.TemplateResponse(request, "month.html", {
         "m": row, "d": detail, "biggest": biggest, "notable": notable, "cards": cards,
@@ -641,18 +666,22 @@ def month_view(request: Request, ym: str):
 
 
 @app.get("/analytics", response_class=HTMLResponse)
-def analytics(request: Request):
-    """The month page's breakdowns, side by side across every complete month.
+def analytics(request: Request, month: list[str] = Query(default=[])):
+    """The month page's breakdowns, side by side across the months you pick.
 
-    Only complete months (every card billed for all of it) are compared — the
+    Only complete months (every card billed for all of it) are on offer — the
     part-billed ones are named and left out rather than dropped into the grid
     as short columns that read as a dip in spending.
+
+    `?month=` repeated narrows that to a chosen subset, and with none given the
+    page compares them all, as it always has. The choice lives in the URL and
+    nowhere else: every figure here is a slice of the same data, so a link to a
+    particular window is worth more than a remembered setting that silently
+    changes what the next visit means.
     """
     with db.connect() as conn:
-        data = db.analytics(conn)
-        cards = {r["label"]: r["id"] for r in conn.execute(
-            """SELECT id, issuer || CASE WHEN last4 IS NULL THEN '' ELSE ' ····' || last4 END
-                 AS label FROM account""")} if data["enough"] else {}
+        data = db.analytics(conn, month or None)
+        cards = db.card_options(conn) if data["enough"] else {}
     return templates.TemplateResponse(request, "analytics.html", {"a": data, "cards": cards})
 
 
@@ -828,6 +857,51 @@ def drop_merchant_group(name: str = Form("")):
         return redirect("/merchants/groups", error="No such group")
     return redirect("/merchants/groups",
                     notice=f"{name} ungrouped — {dropped} merchant(s) back on their own")
+
+
+@app.get("/cards", response_class=HTMLResponse)
+def cards(request: Request, error: str | None = None, notice: str | None = None):
+    """The cards the statements were billed to, and which of them are one card.
+
+    A bank that replaces a card gives it a new number, and the app meets it as a
+    new card: a lineage that stops dead in August and another that begins in
+    September. Nothing in a statement says the two are related — only the person
+    whose card was reissued knows that — so this is a screen rather than a rule,
+    for the same reason merchant grouping is.
+
+    It is not cosmetic. A month counts as complete only when every card is
+    billed for all of it, so an unlinked replacement leaves some card missing
+    from every month in the report, and with it the like-for-like comparison
+    and the trailing average.
+    """
+    with db.connect() as conn:
+        return templates.TemplateResponse(request, "cards.html", {
+            "cards": db.card_list(conn), "error": error, "notice": notice,
+        })
+
+
+@app.post("/cards/replace")
+def link_card(card: int = Form(...), replaced_by: str = Form("")):
+    """Link one card to the card that replaced it, or unlink it.
+
+    Reporting only, and reversible: no statement moves, no transaction is
+    touched, and unlinking puts both cards back on the timeline as they were.
+    """
+    raw = replaced_by.strip()
+    if raw and not raw.isdigit():
+        return redirect("/cards", error="No such card")
+    target = int(raw) if raw else None
+    with db.connect() as conn:
+        lineages = db.card_lineages(conn)
+        label = lineages[card]["label"] if card in lineages else "That card"
+        problem = db.set_card_replacement(conn, card, target)
+        if problem:
+            return redirect("/cards", error=problem)
+        conn.commit()
+        now = db.card_lineages(conn)[card]["label"]
+    if target is None:
+        return redirect("/cards", notice=f"{label} is on its own again")
+    return redirect("/cards", notice=f"{now} — one card, with its history")
 
 
 @app.get("/rules", response_class=HTMLResponse)
