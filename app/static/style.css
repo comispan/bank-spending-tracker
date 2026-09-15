@@ -12,6 +12,21 @@
   --fail: #99301f;
   --fail-bg: #fbe9e6;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* Year-over-year series. Deliberately not --accent and friends: --accent is
+     too grey to carry identity (it reads as gray against the checks below),
+     and --warn/--fail mean "something is wrong" everywhere else in the app, so
+     a year drawn in them would read as a verdict on that year.
+
+     Each set is validated as a whole against its own surface — lightness band,
+     chroma floor, colour-blind separation on every pair, normal-vision
+     separation, and 3:1 against the background — so the three lines stay
+     tellable apart in both themes and under protanopia and deuteranopia.
+     Re-run the check before changing a value, and keep three: a fourth hue
+     that clears all of it at these lightnesses does not exist. */
+  --yoy-1: #00836c;
+  --yoy-2: #7a4e9c;
+  --yoy-3: #a85a15;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -28,6 +43,12 @@
     --warn-bg: #362c17;
     --fail: #ec8877;
     --fail-bg: #3a211d;
+
+    /* The same three hues stepped for the dark surface, not the light values
+       reused: those sit far too dark on it to read as lines. */
+    --yoy-1: #26a183;
+    --yoy-2: #8c80e0;
+    --yoy-3: #c2823a;
   }
 }
 
@@ -323,9 +344,14 @@ svg.spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.4;
   stroke-linecap: round; stroke-linejoin: round; }
 svg.spark .pk { fill: var(--accent); }
 
-/* Spend-per-month column chart. One hue; below-average months drop to a lighter
+/* Spend-per-month column chart. One hue; below-average months drop to a faded
    fill and the dashed line carries the comparison. Time reads left to right,
-   which the horizontal bar list it replaced could not do. */
+   which the horizontal bar list it replaced could not do.
+
+   Faded, not "lighter": the same opacity that pales a dark accent on the light
+   background darkens a pale one against the dark background, so a caption that
+   names a direction is wrong in one of the two themes. Only the fading itself
+   is true in both. */
 .chartwrap { margin: .75rem 0 1rem; max-width: 760px; }
 svg.colchart { overflow: visible; }
 svg.colchart .col { fill: var(--accent); }
@@ -342,6 +368,44 @@ svg.colchart .collabel { fill: var(--ink); font-size: 11px;
 svg.colchart .colyear { fill: var(--muted); font-size: 9.5px;
   font-variant-numeric: tabular-nums; letter-spacing: .04em; }
 table.spendtable { max-width: 30rem; }
+
+/* Year-over-year overlay. One line per year over the same calendar months, so
+   a change in level shows as two lines apart rather than as scatter around a
+   single average that describes neither year. Thin lines, recessive grid, dots
+   ringed in the page colour so a crossing stays readable, and the year named
+   at the end of its own line — identity never rests on the colour alone. */
+svg.yoychart { overflow: visible; }
+svg.yoychart .gridline { stroke: var(--line); stroke-width: 1; }
+svg.yoychart .gridline.zero { stroke: var(--muted); opacity: .5; }
+svg.yoychart .ytick, svg.yoychart .xtick { fill: var(--muted); font-size: 10.5px;
+                                           font-variant-numeric: tabular-nums; }
+svg.yoychart .yline { fill: none; stroke-width: 2; stroke-linecap: round;
+                      stroke-linejoin: round; }
+svg.yoychart .ydot { stroke: var(--bg); stroke-width: 2; }
+svg.yoychart .ylabel { fill: var(--ink); font-size: 11px; font-weight: 600;
+                       font-variant-numeric: tabular-nums; }
+svg.yoychart .s1 { stroke: var(--yoy-1); }
+svg.yoychart .s2 { stroke: var(--yoy-2); }
+svg.yoychart .s3 { stroke: var(--yoy-3); }
+svg.yoychart .ydot.s1 { fill: var(--yoy-1); }
+svg.yoychart .ydot.s2 { fill: var(--yoy-2); }
+svg.yoychart .ydot.s3 { fill: var(--yoy-3); }
+
+/* The legend carries each year's own figures: the number the page's single
+   average cannot give, sitting next to the line it belongs to. */
+.yoylegend { display: flex; gap: 1.4rem; flex-wrap: wrap; margin: .5rem 0 .75rem;
+             padding: 0; list-style: none; font-size: .82rem; }
+.yoylegend li { display: flex; align-items: baseline; gap: .4rem; }
+.yoylegend .swatch { width: .8rem; height: .2rem; border-radius: 1px; flex: none;
+                     align-self: center; }
+.yoylegend .swatch.s1 { background: var(--yoy-1); }
+.yoylegend .swatch.s2 { background: var(--yoy-2); }
+.yoylegend .swatch.s3 { background: var(--yoy-3); }
+.yoylegend .yr { font-weight: 650; font-variant-numeric: tabular-nums; }
+.yoylegend .fig { color: var(--muted); font-variant-numeric: tabular-nums; }
+table.yoytable { max-width: 34rem; font-variant-numeric: tabular-nums; }
+
+
 
 /* Card coverage timeline on /months. One axis for every card: the table it
    leads could say when each card starts and stops, but not whether the five of
