@@ -359,6 +359,15 @@ svg.colchart .col.under { fill: var(--accent); opacity: .42; }
 svg.colchart a:hover .col { opacity: .8; }
 svg.colchart .axis { stroke: var(--line); stroke-width: 1; }
 svg.colchart .avgline { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
+/* The rolling mean, cased in the page colour: an ink line crossing a column of
+   much the same darkness would otherwise vanish into it, and this chart's whole
+   point is where the two levels sit against each other. Solid against the flat
+   average's dashes — two lines of the same kind would read as one comparison. */
+svg.colchart .rollcase { fill: none; stroke: var(--bg); stroke-width: 5;
+                         stroke-linecap: round; stroke-linejoin: round; }
+svg.colchart .rollline { fill: none; stroke: var(--ink); stroke-width: 2;
+                         stroke-linecap: round; stroke-linejoin: round; }
+svg.colchart .rolldot { fill: var(--ink); stroke: var(--bg); stroke-width: 2; }
 svg.colchart .colval { fill: var(--muted); font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   stroke: var(--bg); stroke-width: 3px; paint-order: stroke; }
