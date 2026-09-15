@@ -277,28 +277,60 @@
    font. #}
 {% set cents = colW >= 56 %}{% set tight = colW < 38 %}
 <div class="chartwrap">
+{# Column centre and value height, shared by the columns, the rolling line and
+   the labels — three passes over the same months, so the geometry is written
+   once and the line lands on the column it belongs to. #}
+{% macro cx(m) %}{{ (colW * a.months.index(m) + colW / 2) | round(1) }}{% endmacro %}
+{% macro cy(v) %}{{ (base - plotH * v / ymax) | round(1) }}{% endmacro %}
+<div class="chartwrap">
 <svg class="colchart" viewBox="0 0 {{ W }} {{ H }}" width="100%" role="img"
-     aria-label="Net spend for each of the {{ n }} complete months from {{ a.series[0].month }} to {{ a.series[-1].month }}, against the average.">
+     aria-label="Net spend for each of the {{ n }} complete months from {{ a.series[0].month }} to {{ a.series[-1].month }}, against the average{{ ' and a %d-month rolling average' % a.roll_window if a.roll_runs }}. The exact figures are in the table below the chart.">
   <line class="axis" x1="0" y1="{{ base }}" x2="{{ W }}" y2="{{ base }}"/>
   <line class="avgline" x1="0" y1="{{ avgY | round(1) }}" x2="{{ W }}" y2="{{ avgY | round(1) }}"/>
+
+  {# Pass 1: the columns. #}
   {% for s in a.series %}
-    {% set cx = colW * loop.index0 + colW / 2 %}
-    {% set bh = plotH * s.spend / ymax %}
-    {% set by = base - bh %}
     <a href="/months/{{ s.month }}">
       {# The hover readout says only what the column cannot: the gap against the
-         average. The month is on the axis and the figure is over the bar. #}
+         average, and what the last three months have been running at. The month
+         is on the axis and the figure is over the bar. #}
       <rect class="col{{ ' under' if s.spend < a.avg_minor }}"
-            data-tip="{{ s.spend | money }}&#10;{{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }} vs average"
-            x="{{ (cx - barW / 2) | round(1) }}" y="{{ by | round(1) }}"
-            width="{{ barW | round(1) }}" height="{{ bh | round(1) }}" rx="3"/>
-      <text class="colval{{ ' tight' if tight }}" x="{{ cx | round(1) }}" y="{{ (by - 6) | round(1) }}" text-anchor="middle">{{ (s.spend | money) if cents else (s.spend | money0) }}</text>
-      <text class="collabel" x="{{ cx | round(1) }}" y="{{ (base + 17) | round(1) }}" text-anchor="middle">{{ s.month[5:] }}</text>
+            {# The line break stays in the markup: inside an expression the
+               entity's `&` is escaped and the readout grows a literal `&#10;`. #}
+            data-tip="{{ s.spend | money }}&#10;{{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }} vs average{% if s.roll_minor %}&#10;{{ s.roll_minor | money }} over the {{ a.roll_window }} months to here{% endif %}"
+            x="{{ (cx(s.month) | float - barW / 2) | round(1) }}" y="{{ cy(s.spend) }}"
+            width="{{ barW | round(1) }}" height="{{ (plotH * s.spend / ymax) | round(1) }}" rx="3"/>
+    </a>
+  {% endfor %}
+
+  {# Pass 2: the rolling mean, over the columns and under the figures. One line
+     per unbroken run of months — see `_rolling` — and a casing in the page
+     colour beneath it, because an ink line crossing a column of the same
+     darkness would otherwise disappear into it. #}
+  {% for run in a.roll_runs %}
+    {% set pts %}{% for p in run %}{{ cx(p.month) }},{{ cy(p.value) }} {% endfor %}{% endset %}
+    {% if run | length > 1 %}
+      <polyline class="rollcase" points="{{ pts }}"/>
+      <polyline class="rollline" points="{{ pts }}"/>
+    {% else %}
+      {# A run of exactly three months yields a single mean. A lone dot is the
+         honest way to show it: there is no trend in one point to draw. #}
+      <circle class="rolldot" r="3.2" cx="{{ cx(run[0].month) }}" cy="{{ cy(run[0].value) }}"/>
+    {% endif %}
+  {% endfor %}
+
+  {# Pass 3: the figures and the axis, last so nothing is drawn across them.
+     Linked again rather than moved inside pass 1, so the label under a column
+     still opens that month. #}
+  {% for s in a.series %}
+    <a href="/months/{{ s.month }}">
+      <text class="colval{{ ' tight' if tight }}" x="{{ cx(s.month) }}" y="{{ (cy(s.spend) | float - 6) | round(1) }}" text-anchor="middle">{{ (s.spend | money) if cents else (s.spend | money0) }}</text>
+      <text class="collabel" x="{{ cx(s.month) }}" y="{{ (base + 17) | round(1) }}" text-anchor="middle">{{ s.month[5:] }}</text>
       {# The year, once, wherever it turns over. Without it a run longer than
          twelve months shows two columns labelled 01 and no way to tell them
          apart, now that the readout no longer spells the month out. #}
       {% if loop.first or s.month[:4] != loop.previtem.month[:4] %}
-        <text class="colyear" x="{{ cx | round(1) }}" y="{{ (base + 30) | round(1) }}" text-anchor="middle">{{ s.month[:4] }}</text>
+        <text class="colyear" x="{{ cx(s.month) }}" y="{{ (base + 30) | round(1) }}" text-anchor="middle">{{ s.month[:4] }}</text>
       {% endif %}
     </a>
   {% endfor %}
@@ -306,14 +338,23 @@
 </div>
 <p class="hint caption">
   Dashed line: the {{ n }}-month average, {{ a.avg_minor | money }}. Faded
-  columns fall below it. Hover a column for its gap against that average, or
-  click one to open that month.
+  columns fall below it.
+  {% if a.roll_runs %}
+    Solid line: the {{ a.roll_window }}-month rolling average — the mean of that
+    month and the two before it, so it says what spending was running at just
+    then rather than over the whole range. It starts at the third month and
+    restarts after any gap, because a window that is not full is not a
+    {{ a.roll_window }}-month average.
+  {% endif %}
+  Hover a column for its gap against that average, or click one to open that
+  month.
 </p>
 
 <details class="monthly">
   <summary>Exact figures</summary>
   <table class="spendtable">
-    <thead><tr><th>Month</th><th class="num">Spend</th><th class="num">vs average</th></tr></thead>
+    <thead><tr><th>Month</th><th class="num">Spend</th><th class="num">vs average</th>
+      {% if a.roll_runs %}<th class="num">{{ a.roll_window }}-mth avg</th>{% endif %}</tr></thead>
     <tbody>
     {% for s in a.series %}
       <tr>
@@ -324,12 +365,19 @@
             {{ '+' if s.spend > a.avg_minor }}{{ (s.spend - a.avg_minor) | money }}
           </span>
         </td>
+        {% if a.roll_runs %}
+          <td class="num muted">
+            {%- if s.roll_minor %}{{ s.roll_minor | money }}
+            {%- else %}·{% endif -%}
+          </td>
+        {% endif %}
       </tr>
     {% endfor %}
       <tr class="footrow">
         <td>Average</td>
         <td class="num">{{ a.avg_minor | money }}</td>
         <td class="num muted">{{ a.min_minor | money }} – {{ a.max_minor | money }}</td>
+        {% if a.roll_runs %}<td></td>{% endif %}
       </tr>
     </tbody>
   </table>

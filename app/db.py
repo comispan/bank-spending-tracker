@@ -1359,6 +1359,59 @@ def _pivot(rows: list[sqlite3.Row], months: list[str], top: int | None = None) -
     return out
 
 
+_ROLL_WINDOW = 3
+
+
+def _month_after(ym: str) -> str:
+    """`2025-12` -> `2026-01`. The only month arithmetic the report needs."""
+    index = int(ym[:4]) * 12 + int(ym[5:])
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
+def _consecutive_runs(series: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Split months in page order wherever the calendar skips.
+
+    Every line this page draws over the months is a line through time, and two
+    columns standing next to each other are not next to each other in time if
+    the month between them was never selected or never complete.
+    """
+    runs: list[list[dict[str, Any]]] = []
+    for s in series:
+        if runs and s["month"] == _month_after(runs[-1][-1]["month"]):
+            runs[-1].append(s)
+        else:
+            runs.append([s])
+    return runs
+
+
+def _rolling(series: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Trailing {0}-month mean, written onto each month and returned for drawing.
+
+    The flat average across the whole run is a single number for a run that may
+    not hold a single level: on the real corpus it sits between a 2025 cluster
+    and a 2026 one and matches neither. A trailing mean has no such problem —
+    it says what the last three months have been running at, wherever you read
+    it — and the gap between the two lines is itself the finding.
+
+    Only whole windows. A "3-month average" of the first two months is the mean
+    of one or two months under a label that says three, and it would start the
+    line at a level nothing else on the chart shares. Those months get `None`,
+    the line starts at the third, and it restarts after every gap.
+    """.format(_ROLL_WINDOW)
+    out = []
+    for run in _consecutive_runs(series):
+        pts = []
+        for i, s in enumerate(run):
+            window = run[i + 1 - _ROLL_WINDOW:i + 1] if i + 1 >= _ROLL_WINDOW else []
+            s["roll_minor"] = (round(sum(x["spend"] for x in window) / _ROLL_WINDOW)
+                               if window else None)
+            if window:
+                pts.append({"month": s["month"], "value": s["roll_minor"]})
+        if pts:
+            out.append(pts)
+    return out
+
+
 # One validated hue per year, and there are three of them (`--yoy-1..3` in the
 # stylesheet). A fourth line would have to repeat one, and two years in one
 # colour is worse than a year the page says it is not drawing.
@@ -1484,6 +1537,7 @@ def analytics(conn: sqlite3.Connection,
     series = [{"month": ym, "spend": per_month.get(ym, 0)} for ym in months]
     spends = [s["spend"] for s in series]
     overlay = _year_overlay(series, available)
+    roll_runs = _rolling(series)          # also writes roll_minor onto `series`
 
     def grid(label_sql: str, join: str = "", where: str = "", top: int | None = None,
              value: str = _SPEND, relabel: dict[Any, str] | None = None):
@@ -1512,6 +1566,8 @@ def analytics(conn: sqlite3.Connection,
         "enough": True,
         "series": series,
         "overlay": overlay,
+        "roll_runs": roll_runs,
+        "roll_window": _ROLL_WINDOW,
         "avg_minor": round(sum(spends) / len(spends)),
         "max_minor": max(spends),
         "min_minor": min(spends),
