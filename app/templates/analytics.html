@@ -305,7 +305,7 @@
 </svg>
 </div>
 <p class="hint caption">
-  Dashed line: the {{ n }}-month average, {{ a.avg_minor | money }}. Lighter
+  Dashed line: the {{ n }}-month average, {{ a.avg_minor | money }}. Faded
   columns fall below it. Hover a column for its gap against that average, or
   click one to open that month.
 </p>
@@ -334,6 +334,128 @@
     </tbody>
   </table>
 </details>
+
+{% if a.overlay %}
+{% set o = a.overlay %}
+<h2>Year over year</h2>
+<p class="hint">
+  The same calendar months, one line per year. A single average across a run
+  that changed level sits between the two and describes neither — two lines say
+  which year moved, and by how much.
+</p>
+
+{% set W = 760 %}{% set H = 250 %}
+{% set padL = 56 %}{% set padR = 50 %}{% set padT = 14 %}{% set padB = 32 %}
+{% set plotW = W - padL - padR %}{% set plotH = H - padT - padB %}
+{% set base = H - padB %}
+{% set n = o.months | length %}{% set span = (n - 1) or 1 %}
+{% set ymax = o.max_minor or 1 %}
+{# The x position of a calendar month, shared by the lines, the dots and the
+   labels — the whole point of the chart is that 05 sits over 05. #}
+{% macro cx(mm) %}{{ (padL + o.months.index(mm) * plotW / span) | round(1) }}{% endmacro %}
+{% macro cy(v) %}{{ (padT + plotH * (1 - v / ymax)) | round(1) }}{% endmacro %}
+
+<div class="chartwrap">
+<svg class="yoychart" viewBox="0 0 {{ W }} {{ H }}" width="100%" role="img"
+     aria-label="Net spend by calendar month, one line per year: {{ o.years | map(attribute='year') | join(', ') }}. The exact figures are in the table below the chart.">
+  {# Three gridlines, no more: the figures live on the line labels and in the
+     table, and a ruled background would compete with the lines themselves. #}
+  {% for f in [0, 0.5, 1] %}
+    <line class="gridline{{ ' zero' if f == 0 }}" x1="{{ padL }}" x2="{{ padL + plotW }}"
+          y1="{{ (base - plotH * f) | round(1) }}" y2="{{ (base - plotH * f) | round(1) }}"/>
+    <text class="ytick" x="{{ padL - 8 }}" y="{{ (base - plotH * f + 3.5) | round(1) }}"
+          text-anchor="end">{{ (ymax * f) | round | int | money0 }}</text>
+  {% endfor %}
+  {% for mm in o.months %}
+    <text class="xtick" x="{{ cx(mm) }}" y="{{ base + 16 }}" text-anchor="middle">{{ mm }}</text>
+  {% endfor %}
+
+  {% for e in o.years %}
+    {# One polyline per consecutive run, so an unselected month leaves a gap
+       instead of a straight line through months nobody asked for. #}
+    {% for run in e.runs %}
+      {% if run | length > 1 %}
+        <polyline class="yline s{{ e.slot }}" points="
+          {%- for p in run %}{{ cx(p.mm) }},{{ cy(p.spend) }} {% endfor -%}"/>
+      {% endif %}
+    {% endfor %}
+    {% for p in e.points %}
+      <a href="/months/{{ p.month }}">
+        <circle class="ydot s{{ e.slot }}" r="4" cx="{{ cx(p.mm) }}" cy="{{ cy(p.spend) }}"
+                data-tip="{{ p.month }}&#10;{{ p.spend | money }}"/>
+      </a>
+    {% endfor %}
+    {# The year at the end of its own line, in ink: the line carries the
+       colour, the word carries the identity, and neither depends on the other
+       being legible. #}
+    {% set last = e.points[-1] %}
+    <text class="ylabel" x="{{ (cx(last.mm) | float) + 8 }}" y="{{ (cy(last.spend) | float) + 4 }}">{{ e.year }}</text>
+  {% endfor %}
+</svg>
+</div>
+
+<ul class="yoylegend">
+  {% for e in o.years %}
+    <li>
+      <span class="swatch s{{ e.slot }}"></span>
+      <span class="yr">{{ e.year }}</span>
+      <span class="fig">{{ e.total | money }} over {{ e.points | length }} month{{ 's' if e.points | length != 1 }}
+        · {{ e.avg | money }}/month</span>
+    </li>
+  {% endfor %}
+</ul>
+
+<p class="hint caption">
+  {% if o.common | length %}
+    {# Whole years are not comparable when one of them is seven months long —
+       the same mistake as a part-billed month, one level up — so the headline
+       figure is over the months every year on the chart actually has. #}
+    {% set first = o.years[0] %}{% set last = o.years[-1] %}
+    Months {{ o.common[0] }}–{{ o.common[-1] if o.common | length > 1 else o.common[0] }},
+    the {{ o.common | length }} that every year here has:
+    {% for e in o.years %}{{ e.year }} {{ e.common_total | money }}{{ ', ' if not loop.last }}{% endfor %}
+    {%- if first.common_total %} — {{ last.year }} is
+      {{ ((last.common_total - first.common_total) * 100 / first.common_total) | round | int | abs }}%
+      {{ 'higher' if last.common_total > first.common_total else 'lower' }} than {{ first.year }}
+      on the same months{% endif %}.
+  {% else %}
+    No calendar month is present in every year here, so there is no like-for-like
+    total to give — the lines overlap nowhere.
+  {% endif %}
+  Hover a point for its month, or click one to open it.
+  {% if o.omitted %}
+    Only the {{ o.years | length }} most recent years are drawn; {{ o.omitted | join(', ') }}
+    {{ 'is' if o.omitted | length == 1 else 'are' }} in the selection but not on this chart.
+  {% endif %}
+</p>
+
+<details class="monthly">
+  <summary>Exact figures</summary>
+  <table class="yoytable">
+    <thead>
+      <tr><th>Month</th>{% for e in o.years %}<th class="num">{{ e.year }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+    {% for mm in o.months %}
+      <tr>
+        <td>{{ mm }}</td>
+        {% for e in o.years %}
+          {% set p = e.points | selectattr('mm', 'eq', mm) | first %}
+          <td class="num">
+            {%- if p %}<a href="/months/{{ p.month }}">{{ p.spend | money }}</a>
+            {%- else %}<span class="muted">·</span>{% endif -%}
+          </td>
+        {% endfor %}
+      </tr>
+    {% endfor %}
+      <tr class="footrow">
+        <td>Total</td>
+        {% for e in o.years %}<td class="num">{{ e.total | money }}</td>{% endfor %}
+      </tr>
+    </tbody>
+  </table>
+</details>
+{% endif %}
 
 <h2>By category</h2>
 {{ bars(a.by_category, 'category') }}

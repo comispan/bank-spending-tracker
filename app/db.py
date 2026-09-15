@@ -1359,6 +1359,79 @@ def _pivot(rows: list[sqlite3.Row], months: list[str], top: int | None = None) -
     return out
 
 
+# One validated hue per year, and there are three of them (`--yoy-1..3` in the
+# stylesheet). A fourth line would have to repeat one, and two years in one
+# colour is worse than a year the page says it is not drawing.
+_OVERLAY_YEARS = 3
+
+
+def _year_overlay(series: list[dict[str, Any]], available: list[str]) -> dict[str, Any] | None:
+    """The same calendar months laid over each other, one line per year.
+
+    The column chart answers "how much in each month". This answers a question
+    it cannot: whether a year is running at a different *level* from the one
+    before. A single average across a run that changed level sits between the
+    two clusters and describes neither, so the comparison has to be drawn per
+    year rather than read off one flat line.
+
+    `None` when the selection is inside one year — there is nothing to lay over
+    anything.
+
+    Points are split into consecutive runs. A line drawn straight from March to
+    July because nobody selected April is a shape the data does not have, and
+    it is indistinguishable from four months of steady spending.
+    """
+    by_year: dict[str, list[dict[str, Any]]] = {}
+    for s in series:
+        by_year.setdefault(s["month"][:4], []).append(
+            {"mm": s["month"][5:], "month": s["month"], "spend": s["spend"]})
+    if len(by_year) < 2:
+        return None
+
+    years = sorted(by_year)
+    shown, omitted = years[-_OVERLAY_YEARS:], years[:-_OVERLAY_YEARS]
+
+    # The hue follows the year, not its place in the current selection: a year
+    # keeps the colour it had when the one beside it is unticked. (Its slot
+    # comes from the full run of eligible years, so two *non-adjacent* years
+    # picked out of four or more can land on one hue — the line labels and the
+    # legend are what identify a line either way.)
+    all_years = sorted({ym[:4] for ym in available})
+
+    entries = []
+    for y in shown:
+        pts = by_year[y]
+        runs: list[list[dict[str, Any]]] = []
+        for p in pts:
+            if runs and int(p["mm"]) == int(runs[-1][-1]["mm"]) + 1:
+                runs[-1].append(p)
+            else:
+                runs.append([p])
+        entries.append({
+            "year": y,
+            "slot": all_years.index(y) % _OVERLAY_YEARS + 1,
+            "points": pts,
+            "runs": runs,
+            "total": sum(p["spend"] for p in pts),
+            "avg": round(sum(p["spend"] for p in pts) / len(pts)),
+        })
+
+    # Like for like: the months every drawn year actually has. Comparing whole
+    # years when one of them is seven months long is the same mistake as
+    # comparing a part-billed month, one level up.
+    common = sorted(set.intersection(*({p["mm"] for p in e["points"]} for e in entries)))
+    for e in entries:
+        e["common_total"] = sum(p["spend"] for p in e["points"] if p["mm"] in common)
+
+    return {
+        "years": entries,
+        "omitted": omitted,
+        "months": sorted({p["mm"] for e in entries for p in e["points"]}),
+        "common": common,
+        "max_minor": max(p["spend"] for e in entries for p in e["points"]),
+    }
+
+
 def analytics(conn: sqlite3.Connection,
               selected: Sequence[str] | None = None) -> dict[str, Any]:
     """The month report's breakdowns, but across several *complete* months at once.
@@ -1410,6 +1483,7 @@ def analytics(conn: sqlite3.Connection,
             FROM txn t WHERE substr(t.txn_date, 1, 7) IN ({marks}) GROUP BY 1""", months)}
     series = [{"month": ym, "spend": per_month.get(ym, 0)} for ym in months]
     spends = [s["spend"] for s in series]
+    overlay = _year_overlay(series, available)
 
     def grid(label_sql: str, join: str = "", where: str = "", top: int | None = None,
              value: str = _SPEND, relabel: dict[Any, str] | None = None):
@@ -1437,6 +1511,7 @@ def analytics(conn: sqlite3.Connection,
         "excluded": excluded,
         "enough": True,
         "series": series,
+        "overlay": overlay,
         "avg_minor": round(sum(spends) / len(spends)),
         "max_minor": max(spends),
         "min_minor": min(spends),
