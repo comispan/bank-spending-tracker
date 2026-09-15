@@ -8,6 +8,10 @@ data/
 # Copies of data/ pulled off the EC2 instance by deploy/backup.ps1.
 backups/
 
+# Debugging scratch output. These hold parsed rows from the real statements, so
+# they fall under the rule at the top of this file, not just under tidiness.
+scratch_*
+
 .venv/
 __pycache__/
 *.pyc
