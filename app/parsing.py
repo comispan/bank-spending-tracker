@@ -68,12 +68,19 @@ def redact(text: str) -> str:
 
     Runs before anything is stored or written to disk, so nothing downstream —
     database, page-text dump, review screen — ever holds a full card number.
+
+    The edges are digit lookarounds rather than `\\b`: UOB heads its transaction
+    pages with the unmasked number and the cardholder's name run straight into
+    it ("4111-1111-1111-6037ALEX TAN"), and a word boundary never falls between
+    the last digit and the first letter. With `\\b` that line went into the
+    database unmasked, which is exactly what this function promises never
+    happens.
     """
     def _mask(m: re.Match) -> str:
         digits = re.sub(r"\D", "", m.group(0))
         return "*" * (len(digits) - 4) + digits[-4:]
 
-    return re.sub(r"\b(?:\d[ -]?){12,18}\d\b", _mask, text)
+    return re.sub(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)", _mask, text)
 
 
 @dataclass

@@ -104,8 +104,10 @@ def redact(text: str) -> str:
         digits = re.sub(r"\D", "", m.group(0))
         return "*" * (len(digits) - 4) + digits[-4:]
 
-    # 13-19 digits, optionally split by spaces or dashes in groups
-    return re.sub(r"\b(?:\d[ -]?){12,18}\d\b", _mask, text)
+    # 13-19 digits, optionally split by spaces or dashes in groups. Digit
+    # lookarounds, not \b: a cardholder's name run into the number leaves no
+    # word boundary after the last digit (see app/parsing.py).
+    return re.sub(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)", _mask, text)
 
 
 # ------------------------------------------------------------ pdf -> text

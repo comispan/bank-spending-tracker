@@ -267,10 +267,12 @@ PERIOD_MAX_DAYS = 45      # a billing cycle is about a month; past this it is no
 # digits also sit inside every "Ref No. : 74100000000000000000123", and the last
 # four of a reference are not a card number; requiring the groups to be written
 # apart is what keeps this off them. The trailing digit is excluded rather than
-# using \b, because the name runs straight into the number with no boundary
-# between them.
+# using \b in *both* alternatives, because the name runs straight into the
+# number with no boundary between them — and in the app that line arrives here
+# already masked by `parsing.redact`, as "************6037ALEX TAN", so the
+# masked alternative has to survive the run-in too.
 LAST4_RE = re.compile(
-    r"(?:\*{2,}|x{4,}|X{4,}|•{2,})[\s-]*(?P<masked>\d{4})\b"
+    r"(?:\*{2,}|x{4,}|X{4,}|•{2,})[\s-]*(?P<masked>\d{4})(?!\d)"
     r"|\d{4}[- ]\d{4}[- ]\d{4}[- ](?P<grouped>\d{4})(?!\d)")
 CURRENCY_RE = re.compile(r"\b(SGD|USD|EUR|GBP|AUD|JPY|MYR|HKD)\b")
 YEAR_RE = re.compile(r"\b(20[1-4]\d)\b")
