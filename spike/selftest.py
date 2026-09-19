@@ -455,16 +455,34 @@ def test_row_parsing() -> None:
                              ("2025-01-16", "2025-02-16"), 2025)
     check("a masked card number gives the last four",
           masked["account_last4"] == "6037", repr(masked["account_last4"]))
-    bare = rows.parse_page("     4111-1111-1111-6037ALEX TAN (continued)" + "\n",
-                           ("2025-01-16", "2025-02-16"), 2025)
+    run_in = "     4111-1111-1111-6037ALEX TAN (continued)" + "\n"
+    bare = rows.parse_page(run_in, ("2025-01-16", "2025-02-16"), 2025)
     check("...and so does an unmasked one with a name run into it",
           bare["account_last4"] == "6037", repr(bare["account_last4"]))
+    # In the app that line is masked before rows.py ever sees it, and the mask
+    # has to hold with the name run in: a word boundary never falls between
+    # the last digit and the first letter, so `\b` left it unmasked and the
+    # full number went into the database. Both copies of redact() are checked
+    # — the spike's dry-run output is meant to be safe to paste into a bug
+    # report, so it is under the same promise.
+    import parsing
+    from extract import redact as spike_redact
+    for label, fn in (("app", parsing.redact), ("spike", spike_redact)):
+        masked_line = fn(run_in)
+        check(f"{label} redact masks a number with a name run into it",
+              "4111" not in masked_line and "************6037ALEX TAN" in masked_line,
+              repr(masked_line))
+    after = rows.parse_page(parsing.redact(run_in), ("2025-01-16", "2025-02-16"), 2025)
+    check("...and the masked line still gives the last four",
+          after["account_last4"] == "6037", repr(after["account_last4"]))
     # Sixteen consecutive digits also sit inside every reference. Requiring the
     # groups to be written apart is the whole of what keeps this off them.
-    ref = rows.parse_page("                Ref No. : 74100000000000000000123" + "\n",
-                          ("2025-01-16", "2025-02-16"), 2025)
+    ref_line = "                Ref No. : 74100000000000000000123" + "\n"
+    ref = rows.parse_page(ref_line, ("2025-01-16", "2025-02-16"), 2025)
     check("a reference number is not a card number",
           ref["account_last4"] is None, repr(ref["account_last4"]))
+    check("...and redact leaves a reference alone", parsing.redact(ref_line) == ref_line,
+          repr(parsing.redact(ref_line)))
     # A consolidated statement bills several cards in one document, each its own
     # section with its own PREVIOUS BALANCE and its own TOTAL BALANCE FOR line.
     # Every section's rows are reconciled together, so the balances have to be
@@ -1787,6 +1805,40 @@ def test_card_lineage() -> None:
           db.card_lineages(conn)[1]["label"])
 
 
+def test_redaction_backfill() -> None:
+    """`db.backfill_redaction` — stored page text is re-masked on boot.
+
+    Statements filed while `redact` missed the name-run-in shape hold a full
+    card number in `page_text`. The backfill has to fix those, and has to be a
+    no-op on everything else, or every boot would rewrite every statement.
+    """
+    print("\nredaction backfill")
+    import sqlite3
+    import db
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    conn.execute("INSERT INTO account (id, issuer, kind, last4) VALUES (1, 'UOB', 'credit', '6037')")
+    leaked = json.dumps(["     4111-1111-1111-6037ALEX TAN (continued)\n  15 JAN  SHOP  1.00"])
+    clean = json.dumps(["     UOB ONE CARD ************6037 ALEX TAN\n  15 JAN  SHOP  1.00"])
+    for i, text in enumerate([leaked, clean], start=1):
+        conn.execute(
+            """INSERT INTO statement (id, account_id, filename, file_sha256, storage_path,
+                                      page_count, parser_version, status, verdict, page_text)
+               VALUES (?, 1, ?, ?, ?, 1, 't', 'parsed', 'pass', ?)""",
+            (i, f"s{i}.pdf", f"hash{i}", f"/s{i}", text))
+
+    check("only the statement holding a full number is rewritten",
+          db.backfill_redaction(conn) == 1)
+    after = json.loads(conn.execute("SELECT page_text FROM statement WHERE id = 1").fetchone()[0])
+    check("...and it is masked, with the rest of the page intact",
+          after == ["     ************6037ALEX TAN (continued)\n  15 JAN  SHOP  1.00"], repr(after))
+    check("the already-clean statement is untouched",
+          conn.execute("SELECT page_text FROM statement WHERE id = 2").fetchone()[0] == clean)
+    check("a second boot writes nothing", db.backfill_redaction(conn) == 0)
+
+
 def test_transaction_page() -> None:
     """`db.transaction_page` — the paged all-transactions list.
 
@@ -2074,6 +2126,7 @@ if __name__ == "__main__":
     test_row_parse_notes()
     test_transaction_page()
     test_card_lineage()
+    test_redaction_backfill()
     test_analytics()
     test_cli_runs()
     test_reconciliation()

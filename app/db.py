@@ -21,6 +21,7 @@ import categorize
 import groups
 import merchants
 import months
+import parsing
 import rows
 
 ROOT = Path(__file__).parent.parent
@@ -463,6 +464,29 @@ def backfill_descriptions(conn: sqlite3.Connection) -> int:
                 updates.append((want, merchants.normalize(want), row["id"]))
     conn.executemany(
         "UPDATE txn SET description_raw = ?, merchant_normalized = ? WHERE id = ?", updates)
+    return len(updates)
+
+
+def backfill_redaction(conn: sqlite3.Connection) -> int:
+    """Re-mask stored page text with the current `parsing.redact`.
+
+    `redact` runs on every page before anything is stored, and that is the
+    whole of the promise that the database never holds a full card number. It
+    used to miss one shape — the number with the cardholder's name run into
+    it, which UOB prints at the head of every transaction page — so statements
+    filed before the fix carry that line unmasked in `page_text`. Replayed on
+    boot like the other backfills: the mask is idempotent, so on a clean
+    database this reads every statement once and writes nothing.
+    """
+    updates = []
+    for stmt in conn.execute(
+        "SELECT id, page_text FROM statement WHERE page_text IS NOT NULL"
+    ):
+        pages = json.loads(stmt["page_text"] or "[]")
+        masked = [parsing.redact(page) for page in pages]
+        if masked != pages:
+            updates.append((json.dumps(masked), stmt["id"]))
+    conn.executemany("UPDATE statement SET page_text = ? WHERE id = ?", updates)
     return len(updates)
 
 

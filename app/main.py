@@ -57,6 +57,7 @@ def startup() -> None:
         foreign = db.backfill_foreign_amounts(conn)
         parse_flags = db.backfill_parse_flags(conn)
         descriptions = db.backfill_descriptions(conn)
+        remasked = db.backfill_redaction(conn)
         moved = db.renormalize_merchants(conn)
         seeded = db.seed_memory(conn)
         recategorized = db.recategorize_all(conn)
@@ -65,6 +66,7 @@ def startup() -> None:
                      ("foreign charges split", foreign),
                      ("row parse-flags replayed", parse_flags),
                      ("descriptions replayed", descriptions),
+                     ("page text re-masked", remasked),
                      ("merchant keys recomputed", moved),
                      ("merchants seeded", seeded),
                      ("transactions recategorized", recategorized)):
