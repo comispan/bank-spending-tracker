@@ -9,10 +9,12 @@ of the exercise).
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -243,6 +245,12 @@ def test_row_parsing() -> None:
           repr(row and row["foreign"]))
     check("the statement's own printed rate is kept, not today's",
           bool(row) and row["fx_rate"] == "0.1655", repr(row and row["fx_rate"]))
+    # Two figures on the line is the running-balance signal — except here,
+    # where the second one has just been claimed as the foreign amount. The
+    # real Trust HKD row was reported as a possible running balance for a year.
+    check("a resolved foreign charge is not flagged as a running balance",
+          bool(row) and row["amount_ambiguous"] is False and got["_ambiguous_rows"] == 0,
+          repr(row and row["amount_ambiguous"]))
     # The merchant above is claimed from the gap, never lifted off the row
     # before it — that would rename one transaction after another.
     check("the previous transaction keeps its own name",
@@ -1839,6 +1847,99 @@ def test_redaction_backfill() -> None:
     check("a second boot writes nothing", db.backfill_redaction(conn) == 0)
 
 
+def test_demo_statements() -> None:
+    """`demo.py` — the synthetic set goes through the real parser and gate.
+
+    The demo's claim is that it exercises the same path as an upload, so the
+    check is the same one an upload faces: every PDF parses, reconciles
+    against its own printed totals, and yields its issuer, card and period.
+    Anything less and the Statements page would show the generator's bug as a
+    parser failure, on the one occasion a stranger is looking.
+    """
+    print("\ndemo statements")
+    import demo
+    import parsing
+
+    today = dt.date(2026, 9, 20)
+    files = demo.files(today)
+    check("one statement per card per cycle",
+          len(files) == demo.CYCLES * len(demo.CARDS), str(len(files)))
+    check("every file is named as demo data",
+          all(demo.is_demo(f.filename) for f in files))
+    check("the newest statement closes on the last 14th before today",
+          files[-1].filename.endswith("2026-09-14.pdf"), files[-1].filename)
+
+    tmp = Path(tempfile.mkdtemp())
+    verdicts, warned, fx, credits, unread = [], [], 0, 0, []
+    for f in files:
+        path = tmp / f.filename
+        path.write_bytes(f.payload)
+        r = parsing.parse(path, f.filename, None)
+        verdicts.append(r.verdict)
+        if r.warnings:
+            warned.append((f.filename, r.warnings))
+        stmt = r.statement
+        if (r.issuer != f.card.issuer or stmt.get("account_last4") != f.card.last4
+                or not stmt.get("statement_period_start") or not stmt.get("statement_period_end")
+                or r.rows_expected != len(r.transactions)):
+            unread.append((f.filename, r.issuer, stmt.get("account_last4"),
+                           stmt.get("statement_period_start"), r.rows_expected, len(r.transactions)))
+        fx += sum(1 for t in r.transactions
+                  if (t.get("foreign") or {}).get("currency") and t.get("fx_rate"))
+        credits += sum(1 for t in r.transactions if t["direction"] == "credit")
+    check("every demo statement reconciles against its own printed totals",
+          all(v == "pass" for v in verdicts), repr(Counter(verdicts)))
+    check("...with no parse warnings", not warned, repr(warned[:2]))
+    check("issuer, card, period and every row are read off each one",
+          not unread, repr(unread[:2]))
+    check("the set includes foreign charges with the printed rate", fx >= 4, str(fx))
+    check("...and payments, refunds and cashback", credits >= demo.CYCLES * 3, str(credits))
+
+    # Determinism is what makes the button idempotent: the same period must
+    # produce the same bytes on a later day, so the sha256 dedup skips it.
+    later = {f.filename: f.payload for f in demo.files(dt.date(2026, 10, 20))}
+    kept = [f for f in files if f.filename in later]
+    check("a month later, the overlapping statements are byte-identical",
+          kept and all(later[f.filename] == f.payload for f in kept), str(len(kept)))
+    check("...and only the new cycle is new",
+          len(later) - len(kept) == len(demo.CARDS), str(len(later) - len(kept)))
+
+    # Deleting the demo takes its statements and its empty cards, and nothing
+    # the visitor uploaded themselves — even a card of theirs with no
+    # statements left, which is kept for the same reason delete-all keeps it.
+    import sqlite3
+    import db
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    conn.execute("INSERT INTO account (id, issuer, last4) VALUES (1, 'Meridian Bank', '1111')")
+    conn.execute("INSERT INTO account (id, issuer, last4) VALUES (2, 'DBS', '2277')")
+    conn.execute("INSERT INTO account (id, issuer, last4, replaced_by_id) VALUES (3, 'DBS', '3333', 1)")
+    for i, (account, name) in enumerate([(1, "demo-meridian-bank-2026-08-14.pdf"),
+                                         (2, "mine-demo-2026.pdf"), (2, "dbs.pdf")], start=1):
+        conn.execute(
+            """INSERT INTO statement (id, account_id, filename, file_sha256, storage_path,
+                                      page_count, parser_version, status, verdict)
+               VALUES (?, ?, ?, ?, ?, 1, 't', 'parsed', 'pass')""",
+            (i, account, name, f"hash{i}", f"/s{i}"))
+        conn.execute(
+            """INSERT INTO txn (account_id, statement_id, txn_date, description_raw,
+                                amount_minor, currency, amount_sgd_minor, direction)
+               VALUES (?, ?, '2026-08-01', 'x', 1, 'SGD', 1, 'debit')""", (account, i))
+    paths = db.delete_statements_named(conn, demo.FILENAME_PREFIX)
+    left = sorted(r["filename"] for r in conn.execute("SELECT filename FROM statement"))
+    check("the demo prefix takes every demo-named statement and its rows, by prefix only",
+          paths == ["/s1"] and left == ["dbs.pdf", "mine-demo-2026.pdf"]
+          and conn.execute("SELECT COUNT(*) FROM txn WHERE statement_id = 1").fetchone()[0] == 0,
+          repr((paths, left)))
+    dropped = db.delete_empty_accounts(conn, [c.issuer for c in demo.CARDS])
+    accounts = sorted(r["id"] for r in conn.execute("SELECT id FROM account"))
+    check("its card goes once empty; the visitor's own cards stay",
+          dropped == 1 and accounts == [2, 3], repr((dropped, accounts)))
+    check("a lineage link pointing at the demo card is cleared, not a crash",
+          conn.execute("SELECT replaced_by_id FROM account WHERE id = 3").fetchone()[0] is None)
+
+
 def test_transaction_page() -> None:
     """`db.transaction_page` — the paged all-transactions list.
 
@@ -2127,6 +2228,7 @@ if __name__ == "__main__":
     test_transaction_page()
     test_card_lineage()
     test_redaction_backfill()
+    test_demo_statements()
     test_analytics()
     test_cli_runs()
     test_reconciliation()

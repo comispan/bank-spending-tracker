@@ -7,6 +7,8 @@ spike/passwords.json
 data/
 # Copies of data/ pulled off the EC2 instance by deploy/backup.ps1.
 backups/
+# Where python app\demo.py writes the synthetic set by default. Harmless, but 48 PDFs.
+demo-statements/
 
 # Debugging scratch output. These hold parsed rows from the real statements, so
 # they fall under the rule at the top of this file, not just under tidiness.

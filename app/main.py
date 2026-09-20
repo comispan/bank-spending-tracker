@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import categorize  # noqa: E402
 import db          # noqa: E402
+import demo        # noqa: E402
 import merchants   # noqa: E402
 import months      # noqa: E402
 import parsing     # noqa: E402
@@ -212,7 +213,12 @@ def index(request: Request, error: str | None = None, notice: str | None = None,
         request, "index.html",
         {"statements": statements, "error": error, "notice": notice,
          "sort": sort, "descending": descending,
-         "h": sort_headers(sort, descending)},
+         "h": sort_headers(sort, descending),
+         # The demo set's own size, so the button can say what it is about to
+         # file, and how many of the statements on file are the demo's.
+         "demo": {"statements": demo.CYCLES * len(demo.CARDS), "cards": len(demo.CARDS),
+                  "months": demo.CYCLES,
+                  "on_file": sum(1 for s in statements if demo.is_demo(s["filename"]))}},
     )
 
 
@@ -392,6 +398,54 @@ async def upload_bulk(files: list[UploadFile]):
     if failures:
         error = f"{len(failures)} file(s) not filed — " + "; ".join(failures)
     return redirect("/", notice=notice, error=error)
+
+
+@app.post("/demo")
+def load_demo():
+    """File the synthetic demo set (demo.py) through the upload path.
+
+    Not a seeded database: each PDF is generated, parsed, checked against its
+    own printed totals and categorized exactly as an upload would be, so what
+    the visitor sees is the app working, not a picture of it. The set is
+    deterministic, so a second press finds every file already on file and
+    files nothing — the same `file_sha256` check that catches a real statement
+    uploaded twice.
+    """
+    stored, duplicate, failures = 0, 0, []
+    for f in demo.files():
+        out = ingest_statement(f.payload, f.filename, None)
+        if out.kind == "stored":
+            stored += 1
+        elif out.kind == "duplicate":
+            duplicate += 1
+        else:
+            failures.append(out.message)
+
+    parts = []
+    if stored:
+        parts.append(f"{stored} synthetic statement(s) filed across {len(demo.CARDS)} "
+                     f"made-up cards — every figure here is invented")
+    if duplicate:
+        parts.append(f"{duplicate} already on file, skipped")
+    error = None
+    if failures:
+        # A generator bug would surface here as a parse failure, which is the
+        # right place for it: the gate is not switched off for the demo.
+        error = f"{len(failures)} demo file(s) not filed — " + "; ".join(failures[:3])
+    return redirect("/months", notice=", ".join(parts) or None, error=error)
+
+
+@app.post("/demo/delete")
+def unload_demo():
+    """Remove the demo statements, and its cards once they are empty, and
+    nothing else (Section 7 hard delete)."""
+    with db.connect() as conn:
+        stored = db.delete_statements_named(conn, demo.FILENAME_PREFIX)
+        db.delete_empty_accounts(conn, [c.issuer for c in demo.CARDS])
+        conn.commit()
+    for path in stored:
+        Path(path).unlink(missing_ok=True)
+    return redirect("/", notice=f"{len(stored)} demo statement(s) deleted")
 
 
 def row_parse_notes(txns: list) -> dict[int, list[dict[str, str]]]:

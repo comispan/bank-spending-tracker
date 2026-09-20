@@ -904,6 +904,12 @@ def parse_page(text: str, period: tuple[str | None, str | None] = (None, None),
                     foreign_amount, foreign_currency = str(foreign[0]), foreign[1]
                     fx_rate = _fx_rate_below(lines, i, foreign_currency)
                     description = above
+                    # The second figure on the line was the foreign amount,
+                    # and it has just been claimed as exactly that — so the
+                    # row no longer carries an amount nobody can account for.
+                    # Left flagged, every foreign charge read this way was
+                    # reported as a possible running balance.
+                    ambiguous = False
 
             # Inline first: if the issuer put the reference in the description
             # it belongs to this row for certain, with no lookahead to get wrong.
