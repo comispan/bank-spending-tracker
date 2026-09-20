@@ -1,6 +1,32 @@
 {% extends "base.html" %}
 {% block content %}
 
+<section class="card privacy">
+  <h1>Your statements stay on this machine</h1>
+  <p>
+    A PDF you upload here is parsed by this program, on the computer it is
+    running on. It is <strong>not sent to any server</strong> — there is no
+    account, no cloud, and no one else who can see it. The file and the rows
+    read from it are kept in a <code>data/</code> folder next to the app, and
+    <em>Delete</em> removes both.
+  </p>
+  <p>
+    Full card numbers are masked before anything is stored; only the last four
+    digits are kept. A password for a locked PDF is used to open it in memory
+    and never written anywhere.
+  </p>
+  <p>
+    <strong>The one exception is a button, and it is off by default.</strong>
+    On the Merchants page, tier 3 can ask a model (Google's Gemini, with your
+    own API key) to categorize merchants nothing else could. If you press it,
+    the merchant names and one example statement line each are sent — no
+    amounts, no dates, no card numbers — and the page shows the exact payload
+    before you do. (With grounding switched on, the names also go to Google
+    Search as queries; that page says so too.) Without a key the button does
+    nothing at all.
+  </p>
+</section>
+
 <section class="card">
   <h1>Upload a statement</h1>
   <form method="post" action="/upload" enctype="multipart/form-data" class="upload">
