@@ -13,6 +13,30 @@ architecture, data model, and build plan.
 3. Transactions are categorized (user rules → learned merchant memory → an opt-in model for the rest).
 4. Statements from every card are merged and bucketed by **calendar month**, and rendered as one report that says how far the data actually reaches.
 
+## Try it without a real statement
+
+The landing page has a **Load demo statements** button. It generates 48 synthetic
+statements — three invented banks, sixteen months each — as PDFs and files them
+through the same parser, reconciliation gate and categorizer a real upload goes
+through, then lands on the month report. Nothing in them is anyone's spending,
+and **Delete demo** removes exactly those and leaves your own statements alone.
+`python app\demo.py` writes the same PDFs to a folder if you would rather look
+at them first.
+
+## Your data stays on your machine
+
+Everything runs locally: the PDF is parsed by this program, on the computer it
+is running on, and the file and its rows are kept in a `data/` folder next to
+the app. Nothing is uploaded to any server — there is no account and no cloud.
+Full card numbers are masked before anything is stored; a password for a locked
+PDF is used in memory and never written down.
+
+The one exception is a button that is off unless you configure it: tier 3 on
+the Merchants page can send merchant names (and one example statement line
+each — no amounts, dates or card numbers) to Google's Gemini API with your own
+key, and shows you the exact payload before you press it. See
+[app/README.md](app/README.md#tier-3).
+
 ## Where it got to
 
 Phase 0 asked whether extraction reconciles. It does: across six real statements from six
@@ -71,3 +95,11 @@ Two items from the previous version of this list have since resolved themselves:
 
 **Deliberately deferred:** budgets, forecasting, recurring-subscription detection, bank API
 sync, mobile.
+
+## Licence
+
+[MIT](LICENSE). It is a personal tool that reads bank statements, so the
+warranty and liability disclaimer in that licence is not boilerplate: the parse
+is checked against each statement's own printed totals, and a statement that
+does not reconcile is flagged rather than imported — but the figures it reports
+are only as good as that check, and nothing here is financial advice.
