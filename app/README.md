@@ -11,7 +11,24 @@ python -m uvicorn main:app --app-dir app --port 8000 --reload
 ```
 
 Then open <http://localhost:8000>. Data lives in `data/` — the SQLite file and
-the uploaded PDFs — and is gitignored.
+the uploaded PDFs — and is gitignored. Set `TRACKER_DATA` to point it at
+another folder, which is how to try the demo without it touching your own
+statements.
+
+## Try it without a statement
+
+The button under the upload form files 48 synthetic statements — three
+invented banks, sixteen cycles each — through the same parser, reconciliation
+gate and categorizer as a real upload. Nothing is seeded into the database
+directly: `demo.py` draws each statement as a PDF and `/demo` hands it to
+`ingest_statement`, so what you see is the app doing its job on a statement,
+not a picture of it doing so. The set is deterministic, so a second press
+finds every file already on file and adds nothing, and **Delete demo** takes
+the demo's statements and cards and leaves yours alone.
+
+```powershell
+python app\demo.py demo-statements      # writes the same PDFs to a folder, to look at or upload by hand
+```
 
 ## What's here
 
@@ -25,6 +42,7 @@ the uploaded PDFs — and is gitignored.
 | `tier3.py` | Tier 3: the prompt, the schema, the response gate and the Gemini client. The only outbound request in the app. |
 | `months.py` | Calendar months, and how much of one the statements actually cover. Pure functions. |
 | `db.py` | SQLite schema and queries. Money is integer minor units, never a float. |
+| `demo.py` | The synthetic statements behind the demo button, drawn as PDFs so they go through the parser like any other. |
 | `main.py` | FastAPI routes and the pages. |
 
 `spike/` still runs the same `rows.py` against real statements and prints a

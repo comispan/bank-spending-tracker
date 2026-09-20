@@ -55,6 +55,12 @@ ISSUERS = [
     ("American Express", r"American Express|\bAMEX\b"),
     ("Trust", r"\bTrust Bank\b|\bTrust\b"),
     ("MariBank", r"\bMari ?Bank\b|\bMARI CREDIT\b"),
+    # The demo's invented issuers (demo.py), so a demo statement files under
+    # the bank printed on it rather than under its filename. `\s+` because the
+    # heading is set large and layout mode pads the gap to match.
+    ("Meridian Bank", r"\bMeridian\s+Bank\b"),
+    ("Harbour Bank", r"\bHarbour\s+Bank\b"),
+    ("Northgate Bank", r"\bNorthgate\s+Bank\b"),
 ]
 ISSUER_RE = [(name, re.compile(pat, re.I)) for name, pat in ISSUERS]
 

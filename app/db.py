@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 from collections import Counter
 from collections.abc import Sequence
@@ -25,7 +26,10 @@ import parsing
 import rows
 
 ROOT = Path(__file__).parent.parent
-DATA = ROOT / "data"
+# Where the database and the uploaded PDFs live. `TRACKER_DATA` points it
+# somewhere else — a scratch folder to try the demo in without it touching
+# the statements you actually keep here.
+DATA = Path(os.environ.get("TRACKER_DATA") or ROOT / "data")
 DB_PATH = DATA / "app.db"
 STATEMENT_DIR = DATA / "statements"
 
@@ -735,6 +739,46 @@ def delete_all_statements(conn: sqlite3.Connection) -> list[str]:
     conn.execute("DELETE FROM txn")
     conn.execute("DELETE FROM statement")
     return paths
+
+
+def delete_statements_named(conn: sqlite3.Connection, prefix: str) -> list[str]:
+    """Hard delete every statement whose filename starts with `prefix`.
+
+    What the demo's own delete button runs: the synthetic set is filed under
+    `demo-…` names, and someone who tried the demo and then uploaded their own
+    statements wants the invented ones gone without losing the real ones.
+    Same shape and the same leftovers as `delete_all_statements`.
+    """
+    rows_ = conn.execute(
+        "SELECT id, storage_path FROM statement WHERE filename LIKE ? ESCAPE '\\'",
+        (prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",)
+    ).fetchall()
+    ids = [r["id"] for r in rows_]
+    conn.executemany("DELETE FROM txn WHERE statement_id = ?", [(i,) for i in ids])
+    conn.executemany("DELETE FROM statement WHERE id = ?", [(i,) for i in ids])
+    return [r["storage_path"] for r in rows_]
+
+
+def delete_empty_accounts(conn: sqlite3.Connection, issuers: list[str]) -> int:
+    """Drop the cards of these issuers that no longer have a statement.
+
+    The one departure from "accounts are left in place": a real card with no
+    statements re-attaches on the next upload and is worth keeping for its
+    nickname and lineage link, but the demo's invented banks are not coming
+    back, and three empty cards on /cards would be the demo's residue. Any
+    lineage link the visitor made *to* one of them while trying the screen is
+    cleared first, so the delete cannot fail on the foreign key.
+    """
+    marks = ",".join("?" * len(issuers))
+    gone = [r["id"] for r in conn.execute(
+        f"""SELECT a.id FROM account a
+             WHERE a.issuer IN ({marks})
+               AND NOT EXISTS (SELECT 1 FROM statement s WHERE s.account_id = a.id)""",
+        issuers)]
+    conn.executemany("UPDATE account SET replaced_by_id = NULL WHERE replaced_by_id = ?",
+                     [(i,) for i in gone])
+    conn.executemany("DELETE FROM account WHERE id = ?", [(i,) for i in gone])
+    return len(gone)
 
 
 # ------------------------------------------------------------------- reads
