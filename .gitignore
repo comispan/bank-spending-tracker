@@ -19,3 +19,6 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# deploy/snapshot.py's output: the static demo built for GitHub Pages.
+_site/

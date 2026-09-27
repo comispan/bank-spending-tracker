@@ -17,6 +17,27 @@ What lives here:
 | `spending-tracker.service` | The systemd unit template `setup.sh` installs. |
 | `tunnel.ps1` | Run on your PC: opens the SSH tunnel and the browser. |
 | `backup.ps1` | Run on your PC: pulls `data/` into a timestamped, gitignored `backups\` folder. |
+| `snapshot.py`, `pages/` | Not part of the server: builds the read-only GitHub Pages demo (below). |
+
+## The public demo (GitHub Pages)
+
+Separate from everything else on this page. `.github/workflows/pages.yml` runs
+on every push to `public-release`: `snapshot.py` starts the app in-process on
+a fresh, empty data folder, files the synthetic demo set through `/demo`, and
+saves every page reachable by a link as static HTML. Your own `data/` and
+`TRACKER_DATA` are never read. Forms that write are disabled in the snapshot,
+and an Analytics month pick other than a preset lands on a 404 that says so.
+
+It needs `httpx` beside `requirements.txt` (FastAPI's test client drives the app).
+
+```powershell
+python deploy\snapshot.py --out _site                              # then: python -m http.server -d _site
+python deploy\snapshot.py --out site\bank-spending-tracker --base /bank-spending-tracker   # as Pages serves it
+```
+
+One-time setup: Settings → Pages → Source: **GitHub Actions**, and under
+Settings → Environments → `github-pages`, allow the `public-release` branch
+to deploy.
 
 ## 1. Launch the instance (AWS console)
 

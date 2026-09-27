@@ -1,0 +1,46 @@
+# The static demo on GitHub Pages: deploy/snapshot.py runs the app on the
+# synthetic demo set and saves every page it can reach. No real statement is
+# involved at any point — the script makes its own empty data folder.
+name: Pages demo
+
+on:
+  push:
+    branches: [public-release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt httpx
+      - id: pages
+        uses: actions/configure-pages@v5
+      # base_path is /<repo> for a project page, or empty on a custom domain.
+      - run: python -W ignore deploy/snapshot.py --out _site --base "${{ steps.pages.outputs.base_path }}"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
