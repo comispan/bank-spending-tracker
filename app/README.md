@@ -242,10 +242,11 @@ keeping copies, so the number it reports describes the code that actually runs.
 Anything that cannot beat the `baseline` row — always answer your most common
 category — is not adding anything.
 
-`gemini-3.7-flash` scored **77% correct, 9% wrong, 14% abstained, gate PASS**
-against a 53% baseline on 2026-08-28. All four wrong answers were merchants that
-are genuinely ambiguous; see DESIGN.md Section 3 for the breakdown and for the two bugs
-its abstentions uncovered.
+`gemini-3.8-flash` scored **74% correct, 8% wrong, 18% abstained, gate PASS**
+against a 40% baseline on 2026-10-11, over 65 hand-labelled merchants.
+`gemini-3.7-flash`, re-run on the same set that day, scored 74% / 9% / 17%, so
+3.8 replaced it on the WRONG count. See DESIGN.md Section 3 for the breakdown of
+the original 43-merchant grade and for the two bugs its abstentions uncovered.
 
 **Expect the free tier to be slow rather than broken.** The model answers in
 seconds, but it returns HTTP 500 "experiencing high demand" under load and the

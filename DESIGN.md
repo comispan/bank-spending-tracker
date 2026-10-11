@@ -454,6 +454,13 @@ Any time a user recategorizes a transaction, write the mapping back into tier 2 
 > stores four. That is why `DEFAULT_MODEL` is back at `gemini-3.7-flash`: same
 > set, same prompt, same gate, and this section ranks on WRONG.
 
+> **`gemini-3.8-flash`, 2026-10-11.** By then the hand-labelled set had grown to
+> 65 merchants (baseline 40%), so 3.7 was re-run beside it rather than compared
+> with its old 43-merchant number. Same prompt, same gate, ungrounded:
+> 3.8 scored **48 correct, 5 WRONG, 12 abstained**; 3.7 scored **48 / 6 / 11**.
+> One fewer confident mislabel, and the run took 187s against 391s. `DEFAULT_MODEL`
+> moved to `gemini-3.8-flash`.
+
 > **Example lines added to the payload, 2026-09-05.** A bare normalized key
 > like `2c2` or `store` carries no signal at all, and no model — grounded or
 > not — recovers a fact that was never in the string. `merchant_summary`

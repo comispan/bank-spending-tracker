@@ -49,7 +49,7 @@ ALLOWED = set(CATEGORIES) | {ABSTAIN}
 # logs, history and error messages, none of which is a place for it.
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 API_REVISION = "2026-05-20"
-DEFAULT_MODEL = "gemini-3.7-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
 TIMEOUT_SECONDS = 120
 
 # Merchants per request. One call for the whole batch is what Section 3

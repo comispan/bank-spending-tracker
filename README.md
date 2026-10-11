@@ -80,8 +80,8 @@ One thing is still waiting on something other than code:
 - **Tier 3's grounded path ships off because it has never been graded** — the API key ran
   out of credits mid-run and no grounded eval has been produced since.
   `python spike\eval_categories.py --grounding` finishes the grade once a working key
-  exists. The ungrounded path *is* graded and shipping: `gemini-3.7-flash` scores 33 correct,
-  4 wrong, 6 abstained of 43 hand-labelled merchants (77% / 9%), gate PASS.
+  exists. The ungrounded path *is* graded and shipping: `gemini-3.8-flash` scores 48 correct,
+  5 wrong, 12 abstained of 65 hand-labelled merchants (74% / 8%), gate PASS.
 
 Two items from the previous version of this list have since resolved themselves:
 
