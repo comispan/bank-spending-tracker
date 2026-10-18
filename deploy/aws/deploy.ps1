@@ -4,6 +4,7 @@
 #   deploy\aws\deploy.ps1                       # later: new code, same password
 #
 # Needs the AWS CLI signed in (aws configure / aws sso login) and Python 3.12.
+# Runs in Windows PowerShell 5.1 and PowerShell 7 alike.
 param(
     [string]$StackName = "spending-tracker",
     [string]$AwsProfile = "eugene_home_aws",
@@ -14,42 +15,51 @@ param(
     [switch]$SetGeminiKey
 )
 $ErrorActionPreference = "Stop"
-$PSNativeCommandUseErrorActionPreference = $true
-
-# Every aws call below goes through this, so all of them use the one profile
-# without touching AWS_PROFILE in the shell that ran the script.
-$awsExe = (Get-Command aws -CommandType Application | Select-Object -First 1).Source
-function aws { & $awsExe --profile $AwsProfile @args }
-
-if (-not $Region) {
-    $PSNativeCommandUseErrorActionPreference = $false  # unset exits 1
-    $Region = aws configure get region
-    $PSNativeCommandUseErrorActionPreference = $true
-}
-if (-not $Region) { throw "No region: pass -Region, or set one on profile $AwsProfile." }
 $here = $PSScriptRoot
+$awsExe = (Get-Command aws -CommandType Application | Select-Object -First 1).Source
+
+# Native commands are judged by exit code, never by stderr: Windows PowerShell
+# 5.1 turns a redirected stderr line into a fatal error under "Stop", and the
+# AWS CLI writes progress and expected misses (a 404) there. Every aws call
+# goes through these with the one profile, leaving AWS_PROFILE in the calling
+# shell alone.
+function Invoke-Native([string]$exe, [object[]]$argv) {
+    $ErrorActionPreference = "Continue"
+    & $exe @argv
+    if ($LASTEXITCODE -ne 0) { throw "$(Split-Path $exe -Leaf) $($argv -join ' ') failed (exit $LASTEXITCODE)" }
+}
+function aws { Invoke-Native $awsExe (@("--profile", $AwsProfile) + $args) }
+function py { Invoke-Native "python" $args }
+
+# For calls where failing is an answer, not an error. True on exit code 0;
+# the output, if any, is left in $script:probeOut.
+function Test-Aws {
+    $ErrorActionPreference = "Continue"
+    $script:probeOut = & $awsExe --profile $AwsProfile @args 2>$null
+    $LASTEXITCODE -eq 0
+}
+
+if (-not $Region -and (Test-Aws configure get region)) { $Region = "$probeOut".Trim() }
+if (-not $Region) { throw "No region: pass -Region, or set one on profile $AwsProfile." }
 
 $account = aws sts get-caller-identity --query Account --output text
 $codeBucket = "$StackName-code-$account-$Region"
+Write-Host "Account $account, region $Region, profile $AwsProfile"
 
 # The zip has to be in S3 before the stack can point at it, so its bucket sits
 # outside the stack. Private by default; nothing but code goes in it.
-$PSNativeCommandUseErrorActionPreference = $false  # a miss is an answer here, not a failure
-aws s3api head-bucket --bucket $codeBucket 2>$null
-$missing = $LASTEXITCODE -ne 0
-$PSNativeCommandUseErrorActionPreference = $true
-if ($missing) {
+if (-not (Test-Aws s3api head-bucket --bucket $codeBucket)) {
     Write-Host "Creating code bucket $codeBucket"
     if ($Region -eq "us-east-1") {
         aws s3api create-bucket --bucket $codeBucket --region $Region | Out-Null
     } else {
         aws s3api create-bucket --bucket $codeBucket --region $Region `
-            --create-bucket-configuration LocationConstraint=$Region | Out-Null
+            --create-bucket-configuration "LocationConstraint=$Region" | Out-Null
     }
 }
 
 Write-Host "Building the Lambda zip"
-$zip = python "$here\build.py" zip | Select-Object -Last 1
+$zip = py "$here\build.py" zip | Select-Object -Last 1
 # Named by content, so CloudFormation sees new code as a change and old zips
 # stay put for a rollback.
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.Substring(0, 16).ToLower()
@@ -57,11 +67,13 @@ $codeKey = "lambda-$hash.zip"
 aws s3 cp $zip "s3://$codeBucket/$codeKey" --region $Region --only-show-errors
 
 $overrides = @("CodeBucket=$codeBucket", "CodeKey=$codeKey")
-if ($SetPassword) { $overrides += "PasswordHash=$(python "$here\build.py" hash)" }
+if ($SetPassword) { $overrides += "PasswordHash=$(py "$here\build.py" hash)" }
 if ($AuthUser) { $overrides += "AuthUser=$AuthUser" }
 if ($MaxConcurrency -ge 0) { $overrides += "MaxConcurrency=$MaxConcurrency" }
 if ($SetGeminiKey) {
-    $key = Read-Host "Gemini API key (empty to turn tier 3 off)" -MaskInput
+    $secure = Read-Host "Gemini API key (empty to turn tier 3 off)" -AsSecureString
+    $key = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
     $overrides += "GeminiApiKey=$key"
 }
 
