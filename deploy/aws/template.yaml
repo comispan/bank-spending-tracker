@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Bank spending tracker, single user: one Lambda behind a Function URL, with
+  the SQLite database and statement PDFs in a private S3 bucket. Deploy with
+  deploy/aws/deploy.ps1, which builds the code zip and fills CodeBucket/CodeKey.
+
+Parameters:
+  CodeBucket:
+    Type: String
+    Description: Bucket holding the Lambda zip (deploy.ps1 creates it).
+  CodeKey:
+    Type: String
+    Description: Key of the Lambda zip in CodeBucket.
+  AuthUser:
+    Type: String
+    Default: me
+    Description: Username for the browser's sign-in prompt.
+  PasswordHash:
+    Type: String
+    NoEcho: true
+    AllowedPattern: "pbkdf2_sha256\\$\\d+\\$[A-Za-z0-9+/=]+\\$[A-Za-z0-9+/=]+"
+    Description: From `python deploy/aws/build.py hash`. Never the password itself.
+  GeminiApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional, for tier 3 on the Merchants page. Empty leaves it off.
+  MaxConcurrency:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: >-
+      Caps simultaneous Lambda instances, and with them what a flood of
+      requests can cost. 0 leaves it uncapped (new accounts with a 10-instance
+      quota cannot reserve any). 2 is plenty for one person.
+
+Conditions:
+  HasConcurrencyCap: !Not [!Equals [!Ref MaxConcurrency, 0]]
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain          # deleting the stack never deletes your statements
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256  # SSE-S3: free, unlike a KMS key
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      # Every write of app.db is kept for 30 days: a bad upload or a parser bug
+      # can be rolled back. The database is a few MB, so this costs cents.
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub "${DataBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: data-and-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${DataBucket.Arn}/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt LogGroup.Arn
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}"
+      RetentionInDays: 14
+
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      Runtime: python3.12
+      Architectures: [arm64]       # ~20% cheaper per GB-second than x86
+      Handler: handler.handler
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Role: !GetAtt FunctionRole.Arn
+      # 1 GB buys enough CPU that a statement parses in about a second; the
+      # free tier (400,000 GB-seconds a month) covers that many times over.
+      MemorySize: 1024
+      Timeout: 300                 # a batch of statements, or the 48-PDF demo
+      LoggingConfig:
+        LogGroup: !Ref LogGroup
+      ReservedConcurrentExecutions: !If [HasConcurrencyCap, !Ref MaxConcurrency, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataBucket
+          TRACKER_DATA: /tmp/data
+          AUTH_USER: !Ref AuthUser
+          PASSWORD_HASH: !Ref PasswordHash
+          GEMINI_API_KEY: !Ref GeminiApiKey
+
+  # A Function URL rather than API Gateway: free, HTTPS, and no 29-second cap.
+  # Auth is NONE at the AWS layer because the browser can't sign requests;
+  # handler.py turns away anything without the password before the app runs.
+  FunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref Function
+      AuthType: NONE
+
+  FunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  # Function URLs also need lambda:InvokeFunction, scoped to calls that come
+  # through the URL so this does not open direct invocation to everyone.
+  FunctionInvokeViaUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  Url:
+    Description: Open this and sign in with AuthUser and your password.
+    Value: !GetAtt FunctionUrl.FunctionUrl
+  DataBucket:
+    Description: Where app.db and statements/ live.
+    Value: !Ref DataBucket

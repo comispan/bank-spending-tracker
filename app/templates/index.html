@@ -40,10 +40,51 @@
   </p>
 
   <h2 class="bulk-heading">Bulk upload</h2>
-  <form method="post" action="/upload-bulk" enctype="multipart/form-data" class="upload">
+  <form method="post" action="/upload-bulk" enctype="multipart/form-data" class="upload" id="bulk-upload">
     <input type="file" name="files" accept="application/pdf" multiple required>
     <button type="submit">Upload all</button>
   </form>
+  <script>
+    // A folder goes up in batches of a few MB, not one request: a host that
+    // caps the request body (Lambda: 6MB) would refuse the whole folder. Each
+    // batch answers in JSON, and the summed counts land on the same summary a
+    // single post would give. Without this script the form still posts whole.
+    (function () {
+      var form = document.getElementById('bulk-upload');
+      var BATCH_BYTES = 3.5 * 1024 * 1024;  // under 6MB once base64'd for Lambda
+      form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        var files = Array.from(form.elements.files.files), batches = [], batch = [], size = 0;
+        files.forEach(function (f) {
+          if (batch.length && size + f.size > BATCH_BYTES) { batches.push(batch); batch = []; size = 0; }
+          batch.push(f); size += f.size;
+        });
+        if (batch.length) batches.push(batch);
+
+        var button = form.querySelector('button'), done = 0;
+        var total = {stored: 0, duplicate: 0, failures: []};
+        button.disabled = true;
+        for (var b of batches) {
+          button.textContent = 'Uploading ' + (done + b.length) + ' of ' + files.length + '…';
+          var body = new FormData();
+          b.forEach(function (f) { body.append('files', f); });
+          try {
+            var r = await fetch(form.action, {method: 'POST', body: body, headers: {Accept: 'application/json'}});
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            var out = await r.json();
+            total.stored += out.stored; total.duplicate += out.duplicate;
+            total.failures.push.apply(total.failures, out.failures);
+          } catch (err) {
+            b.forEach(function (f) { total.failures.push(f.name + ': upload failed (' + err.message + ')'); });
+          }
+          done += b.length;
+        }
+        var q = new URLSearchParams({stored: total.stored, duplicate: total.duplicate});
+        total.failures.forEach(function (m) { q.append('failure', m); });
+        location.href = '/upload-bulk/done?' + q;
+      });
+    })();
+  </script>
   <p class="hint">
     Pick several PDFs at once. <strong>No passwords</strong> — a bulk run can't
     stop to ask for each one, so any locked file is skipped and reported.

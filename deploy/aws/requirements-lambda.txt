@@ -1,0 +1,9 @@
+# What the Lambda zip carries: requirements.txt minus uvicorn (Lambda is the
+# server), plus Mangum to hand it requests. boto3 comes with the runtime.
+fastapi>=0.115
+jinja2>=3.1
+python-multipart>=0.0.9
+pdfplumber>=0.11
+pypdf>=5.0
+reportlab>=4.0
+mangum>=0.19

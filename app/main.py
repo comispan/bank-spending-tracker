@@ -365,7 +365,7 @@ async def upload(file: UploadFile, password: str = Form("")):
 
 
 @app.post("/upload-bulk")
-async def upload_bulk(files: list[UploadFile]):
+async def upload_bulk(request: Request, files: list[UploadFile]):
     """File a whole folder of statements in one go (Section 8).
 
     No password field: a bulk run cannot stop to prompt for each locked file,
@@ -373,24 +373,42 @@ async def upload_bulk(files: list[UploadFile]):
     Decrypt those first and upload them singly. Every file is processed
     independently — one bad PDF never blocks the others — and the redirect
     carries a per-file summary so a silent partial success is impossible.
+
+    The page's script sends the folder in batches and asks for JSON, then
+    hands the summed counts to `/upload-bulk/done`. One request per folder
+    would not survive a host that caps the request body — Lambda's is 6MB —
+    and the plain form post still works without the script.
     """
-    stored, duplicate, failures = [], 0, []
+    stored, duplicate, failures = 0, 0, []
     for f in files:
         payload = await f.read()
         out = ingest_statement(payload, f.filename or "", None)
         if out.kind == "stored":
-            stored.append(out.statement_id)
+            stored += 1
         elif out.kind == "duplicate":
             duplicate += 1
         else:
             failures.append(out.message)
 
-    if not files or (not stored and not duplicate and not failures):
+    if "application/json" in request.headers.get("accept", ""):
+        return {"stored": stored, "duplicate": duplicate, "failures": failures}
+    return bulk_summary(stored, duplicate, failures)
+
+
+@app.get("/upload-bulk/done")
+def upload_bulk_done(stored: int = 0, duplicate: int = 0,
+                     failure: list[str] = Query(default=[])):
+    """The end of a batched bulk upload: the same summary one post would get."""
+    return bulk_summary(stored, duplicate, failure)
+
+
+def bulk_summary(stored: int, duplicate: int, failures: list[str]) -> Response:
+    if not stored and not duplicate and not failures:
         return redirect("/", error="No files were selected")
 
     parts = []
     if stored:
-        parts.append(f"{len(stored)} statement(s) filed")
+        parts.append(f"{stored} statement(s) filed")
     if duplicate:
         parts.append(f"{duplicate} already on file, skipped")
     notice = ", ".join(parts) if parts else None

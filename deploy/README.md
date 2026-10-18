@@ -1,5 +1,8 @@
 # Deploying to AWS (single user, locked to one IP)
 
+> Prefer serverless? [aws/README.md](aws/README.md) runs the app on Lambda + S3
+> behind a password instead: nothing to start or stop, and near-zero cost.
+
 One micro EC2 instance. The security group admits **only your static IP, only
 on port 22**; the app binds to localhost and is reached through an SSH tunnel.
 Nothing is served to the public internet, and nothing travels it unencrypted.
