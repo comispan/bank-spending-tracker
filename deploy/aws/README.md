@@ -5,7 +5,7 @@ runs between requests, so it costs nothing while idle and reaches you from any
 browser, not just through an SSH tunnel.
 
 ```
-browser ──HTTPS + Basic auth──▶ Lambda Function URL ──▶ handler.py ──▶ the FastAPI app
+browser ──HTTPS + session cookie──▶ Lambda Function URL ──▶ handler.py ──▶ the FastAPI app
                                                            │
                                                            └── S3 (private): app.db, statements/*.pdf
 ```
@@ -13,7 +13,7 @@ browser ──HTTPS + Basic auth──▶ Lambda Function URL ──▶ handler.
 | File | Does |
 |---|---|
 | `template.yaml` | The CloudFormation stack: private versioned bucket, Lambda (arm64), Function URL, role, logs. |
-| `handler.py` | Lambda entry point: checks the password, syncs `app.db` and PDFs with S3, runs the app. |
+| `handler.py` | Lambda entry point: login page and session cookie, syncs `app.db` and PDFs with S3, runs the app. |
 | `build.py` | Builds the zip (`zip`) with Linux arm64 wheels, or hashes a password (`hash`). |
 | `deploy.ps1` | Builds, uploads the zip, creates or updates the stack, prints the URL. |
 | `data.py` | Copies `data/` up to the bucket (`push`) or down into `backups/` (`pull`). |
@@ -44,7 +44,7 @@ deploy\aws\deploy.ps1 -SetPassword
 
 It prompts for a password (12+ characters; a long random one from a password
 manager is best — it is the only lock), builds the zip, and prints the URL. Open it,
-sign in as `me` with that password, and the browser remembers it.
+and sign in on the login page as `me` with that password. The session lasts 30 days.
 
 Later, to ship new code: `deploy\aws\deploy.ps1` (password unchanged). To change the
 password, add `-SetPassword` again. Other options: `-Region`, `-StackName`,
@@ -77,7 +77,10 @@ python deploy\aws\data.py pull <DataBucket output>
   download the database, run the startup backfills).
 - **Two writes at the same instant:** the second is refused with a "not saved,
   try again" page rather than overwriting the first. Unlikely with one user.
-- **Sign out** by closing the browser — that's how Basic auth works.
+- **Sign out** at `/logout`. Changing the password (`-SetPassword`) signs out every
+  browser at once, which is the way to cut off a session you think was copied.
+- **Why a login page, not the browser's own prompt:** a Function URL renames the
+  `WWW-Authenticate` header, so HTTP Basic auth never shows its prompt there.
 - **Deleting the stack keeps the bucket** (`DeletionPolicy: Retain`), so your data
   survives. Empty and delete it yourself if you really mean it.
 - The landing page still says statements stay on "this machine". Here, that machine

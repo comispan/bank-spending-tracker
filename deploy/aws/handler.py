@@ -13,9 +13,10 @@ between invocations, so `data/` lives in /tmp and S3 is the copy of record:
   database that names it, and one the database no longer names is deleted
   after. Viewing a PDF fetches it into /tmp on demand.
 
-In front of all of it: HTTP Basic auth against a PBKDF2 hash, and a refusal of
-cross-site writes, since a browser sends saved Basic credentials with any
-form post — including one from another site.
+In front of all of it: a login page checked against a PBKDF2 hash, which sets
+a signed session cookie, and a refusal of cross-site writes. Not HTTP Basic
+auth: a Function URL renames the WWW-Authenticate header on the way out, so
+the browser never shows its sign-in prompt.
 """
 
 from __future__ import annotations
@@ -23,10 +24,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
+from urllib.parse import parse_qs, quote
 
 # db.py reads this at import, so it is set before the app is imported.
 DATA = Path(os.environ.setdefault("TRACKER_DATA", "/tmp/data"))
@@ -51,20 +55,39 @@ asgi = Mangum(main.app, lifespan="off")
 _etag: str | None = None   # the S3 version our local app.db came from
 _stamp: tuple[int, int] | None = None  # (mtime_ns, size) as last synced
 _started = False
-_verified: set[str] = set()  # Authorization headers already checked here
 
 
 # --------------------------------------------------------------------- auth
 
-def _check_password(header: str) -> bool:
-    if header in _verified:
-        return True
-    if not header.startswith("Basic "):
-        return False
-    try:
-        user, _, password = base64.b64decode(header[6:]).decode().partition(":")
-    except ValueError:
-        return False
+COOKIE = "tracker_session"
+SESSION_SECONDS = 30 * 24 * 3600
+
+LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Spending Tracker</title>
+<style>
+  :root {{ color-scheme: light dark; --bg: #f6f6f4; --card: #fff; --fg: #1d1d1b; --muted: #666; --line: #d8d8d4; --err: #b42318; }}
+  @media (prefers-color-scheme: dark) {{ :root {{ --bg: #161616; --card: #202020; --fg: #eee; --muted: #999; --line: #3a3a3a; --err: #f97066; }} }}
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif; }}
+  form {{ background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 28px; width: min(320px, calc(100vw - 32px)); box-sizing: border-box; display: grid; gap: 12px; }}
+  h1 {{ margin: 0 0 4px; font-size: 20px; }}
+  label {{ display: grid; gap: 4px; font-size: 14px; color: var(--muted); }}
+  input {{ font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }}
+  button {{ font: inherit; padding: 9px; border: 0; border-radius: 6px; background: #2f6f5e; color: #fff; cursor: pointer; }}
+  .err {{ color: var(--err); font-size: 14px; margin: 0; }}
+</style></head>
+<body><form method="post" action="/login">
+  <h1>Spending Tracker</h1>
+  {error}
+  <input type="hidden" name="next" value="{next}">
+  <label>Username <input name="username" autocomplete="username" required autofocus></label>
+  <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+  <button type="submit">Sign in</button>
+</form></body></html>"""
+
+
+def _check_password(user: str, password: str) -> bool:
     algo, iterations, salt, expected = os.environ["PASSWORD_HASH"].split("$")
     if algo != "pbkdf2_sha256":
         return False
@@ -72,26 +95,82 @@ def _check_password(header: str) -> bool:
                               int(iterations))
     ok = hmac.compare_digest(got, base64.b64decode(expected))
     ok &= hmac.compare_digest(user.encode(), os.environ["AUTH_USER"].encode())
-    if ok:
-        _verified.add(header)
     return ok
 
 
+def _sign(expires: int) -> str:
+    # Keyed on the password hash, so changing the password signs out every
+    # browser that had a session — the one way to revoke a stolen cookie.
+    key = hashlib.sha256(b"session|" + os.environ["PASSWORD_HASH"].encode()).digest()
+    return f"{expires}.{hmac.new(key, str(expires).encode(), hashlib.sha256).hexdigest()}"
+
+
+def _signed_in(event: dict) -> bool:
+    # Payload v2 carries cookies in their own list, not in the headers.
+    for cookie in event.get("cookies") or []:
+        name, _, value = cookie.partition("=")
+        expires = value.partition(".")[0]
+        if (name.strip() == COOKIE and expires.isdigit() and int(expires) > time.time()
+                and hmac.compare_digest(value, _sign(int(expires)))):
+            return True
+    return False
+
+
+def _safe_next(target: str) -> str:
+    # Only a path on this site: "//evil.example" would be an open redirect.
+    return target if target.startswith("/") and not target.startswith(("//", "/\\")) else "/"
+
+
+def _login_page(target: str, error: str = "", status: int = 200) -> dict:
+    return {"statusCode": status, "headers": {"Content-Type": "text/html; charset=utf-8",
+                                              "Cache-Control": "no-store"},
+            "body": LOGIN_PAGE.format(next=html.escape(target),
+                                      error=f'<p class="err">{error}</p>' if error else "")}
+
+
 def _refuse(event: dict) -> dict | None:
+    """A response that stands in for the app's — login, logout, a refusal —
+    or None when the request may go through."""
     headers = event.get("headers") or {}
-    if not _check_password(headers.get("authorization", "")):
-        return {"statusCode": 401, "body": "Sign in required",
-                "headers": {"WWW-Authenticate": 'Basic realm="Spending tracker", charset="UTF-8"',
-                            "Content-Type": "text/plain"}}
     method = event["requestContext"]["http"]["method"]
+    path = event.get("rawPath", "/")
+    query = {k: v[0] for k, v in parse_qs(event.get("rawQueryString", "")).items()}
+
     if method not in ("GET", "HEAD"):
+        # A browser attaches the session cookie to a post from any site that
+        # targets this one; SameSite=Lax stops most of that, this stops the rest.
         site = headers.get("sec-fetch-site")
         origin = headers.get("origin")
-        cross = (site not in (None, "same-origin", "none")
-                 or (origin is not None and origin != f"https://{headers.get('host')}"))
-        if cross:
+        if (site not in (None, "same-origin", "none")
+                or (origin is not None and origin != f"https://{headers.get('host')}")):
             return {"statusCode": 403, "body": "Cross-site request refused",
                     "headers": {"Content-Type": "text/plain"}}
+
+    if path == "/login":
+        if method != "POST":
+            return _login_page(_safe_next(query.get("next", "/")))
+        body = event.get("body") or ""
+        if event.get("isBase64Encoded"):
+            body = base64.b64decode(body).decode()
+        form = {k: v[0] for k, v in parse_qs(body).items()}
+        target = _safe_next(form.get("next", "/"))
+        if not _check_password(form.get("username", ""), form.get("password", "")):
+            return _login_page(target, "Wrong username or password.", 401)
+        session = _sign(int(time.time()) + SESSION_SECONDS)
+        return {"statusCode": 303, "headers": {"Location": target},
+                "cookies": [f"{COOKIE}={session}; Max-Age={SESSION_SECONDS}; Path=/; "
+                            "Secure; HttpOnly; SameSite=Lax"]}
+
+    if path == "/logout":
+        return {"statusCode": 303, "headers": {"Location": "/login"},
+                "cookies": [f"{COOKIE}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax"]}
+
+    if not _signed_in(event):
+        if method in ("GET", "HEAD"):
+            target = path + (f"?{event['rawQueryString']}" if event.get("rawQueryString") else "")
+            return {"statusCode": 303, "headers": {"Location": "/login?next=" + quote(target, safe="")}}
+        return {"statusCode": 401, "body": "Signed out: reload the page to sign in again",
+                "headers": {"Content-Type": "text/plain"}}
     return None
 
 

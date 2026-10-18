@@ -14,7 +14,7 @@ Parameters:
   AuthUser:
     Type: String
     Default: me
-    Description: Username for the browser's sign-in prompt.
+    Description: Username for the login page.
   PasswordHash:
     Type: String
     NoEcho: true
