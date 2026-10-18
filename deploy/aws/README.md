@@ -35,6 +35,8 @@ monthly charge for nothing a single user needs.
 ## Deploy
 
 Needs the AWS CLI signed in (`aws configure` or `aws sso login`) and Python 3.12.
+Both scripts use the AWS profile `eugene_home_aws` and its region. Pass
+`-AwsProfile <name>` to `deploy.ps1`, or set `AWS_PROFILE` for `data.py`, to use another.
 
 ```powershell
 deploy\aws\deploy.ps1 -SetPassword

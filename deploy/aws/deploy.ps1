@@ -6,7 +6,8 @@
 # Needs the AWS CLI signed in (aws configure / aws sso login) and Python 3.12.
 param(
     [string]$StackName = "spending-tracker",
-    [string]$Region = $(aws configure get region),
+    [string]$AwsProfile = "eugene_home_aws",
+    [string]$Region,
     [switch]$SetPassword,
     [string]$AuthUser,
     [int]$MaxConcurrency = -1,
@@ -14,7 +15,18 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
-if (-not $Region) { throw "No region: pass -Region or run aws configure." }
+
+# Every aws call below goes through this, so all of them use the one profile
+# without touching AWS_PROFILE in the shell that ran the script.
+$awsExe = (Get-Command aws -CommandType Application | Select-Object -First 1).Source
+function aws { & $awsExe --profile $AwsProfile @args }
+
+if (-not $Region) {
+    $PSNativeCommandUseErrorActionPreference = $false  # unset exits 1
+    $Region = aws configure get region
+    $PSNativeCommandUseErrorActionPreference = $true
+}
+if (-not $Region) { throw "No region: pass -Region, or set one on profile $AwsProfile." }
 $here = $PSScriptRoot
 
 $account = aws sts get-caller-identity --query Account --output text

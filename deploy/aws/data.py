@@ -11,6 +11,7 @@ never touches the source. Uses the AWS CLI, so no boto3 needed here.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sqlite3
@@ -22,6 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent.parent
 LAMBDA_STATEMENTS = "/tmp/data/statements"
+# The same profile deploy.ps1 uses by default; AWS_PROFILE picks another.
+PROFILE = os.environ.get("AWS_PROFILE") or "eugene_home_aws"
 
 
 def rewrite_paths(db: Path, statement_dir: str, sep: str) -> None:
@@ -35,7 +38,7 @@ def rewrite_paths(db: Path, statement_dir: str, sep: str) -> None:
 
 
 def aws(*args: str) -> None:
-    subprocess.run(["aws", *args], check=True)
+    subprocess.run(["aws", "--profile", PROFILE, *args], check=True)
 
 
 def push(bucket: str) -> None:
