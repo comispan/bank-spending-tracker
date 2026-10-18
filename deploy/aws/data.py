@@ -59,7 +59,9 @@ def push(bucket: str) -> None:
 
 def pull(bucket: str, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=False)
-    aws("s3", "sync", f"s3://{bucket}/", str(dest), "--only-show-errors")
+    # auth/ is the login's own state (the session key among it): no use in a
+    # backup, and a key on disk is one more copy to leak.
+    aws("s3", "sync", f"s3://{bucket}/", str(dest), "--exclude", "auth/*", "--only-show-errors")
     rewrite_paths(dest / "app.db", str((dest / "statements").resolve()), "/")
     print(f"Pulled to {dest}. Run against it with TRACKER_DATA={dest}")
 

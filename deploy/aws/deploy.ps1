@@ -47,8 +47,10 @@ $codeBucket = "$StackName-code-$account-$Region"
 Write-Host "Account $account, region $Region, profile $AwsProfile"
 
 # The zip has to be in S3 before the stack can point at it, so its bucket sits
-# outside the stack. Private by default; nothing but code goes in it.
-if (-not (Test-Aws s3api head-bucket --bucket $codeBucket)) {
+# outside the stack. Its name is guessable, so every call insists the bucket is
+# this account's: one someone else created under that name, open to all, would
+# otherwise take the zip — and could swap it before Lambda reads it.
+if (-not (Test-Aws s3api head-bucket --bucket $codeBucket --expected-bucket-owner $account)) {
     Write-Host "Creating code bucket $codeBucket"
     if ($Region -eq "us-east-1") {
         aws s3api create-bucket --bucket $codeBucket --region $Region | Out-Null
@@ -57,6 +59,28 @@ if (-not (Test-Aws s3api head-bucket --bucket $codeBucket)) {
             --create-bucket-configuration "LocationConstraint=$Region" | Out-Null
     }
 }
+# Private by default today; said outright so a bucket from before that, or one
+# loosened by hand, is closed again. Repeating it costs nothing.
+aws s3api put-public-access-block --bucket $codeBucket --region $Region `
+    --expected-bucket-owner $account --public-access-block-configuration `
+    "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+
+# A cap on simultaneous instances bounds what a flood of requests can cost. It
+# needs an account quota above 10 (AWS keeps 10 unreserved), so a new stack
+# gets 2 when the account allows it; an existing stack keeps what it has.
+$stackExists = Test-Aws cloudformation describe-stacks --stack-name $StackName --region $Region `
+    --query "Stacks[0].Parameters[?ParameterKey=='MaxConcurrency'].ParameterValue" --output text
+$currentCap = if ($stackExists) { "$probeOut".Trim() } else { "" }
+if ($MaxConcurrency -lt 0 -and -not $stackExists) {
+    if ((Test-Aws lambda get-account-settings --region $Region `
+            --query AccountLimit.ConcurrentExecutions --output text) -and [int]"$probeOut".Trim() -ge 12) {
+        $MaxConcurrency = 2
+    }
+}
+if ($MaxConcurrency -eq 0 -or ($MaxConcurrency -lt 0 -and $currentCap -in @("", "0"))) {
+    Write-Warning ("Concurrency is uncapped: a flood of requests has no ceiling on cost. " +
+        "Pass -MaxConcurrency 2 (needs a Lambda quota above 10), or set an AWS Budget alert.")
+}
 
 Write-Host "Building the Lambda zip"
 $zip = py "$here\build.py" zip | Select-Object -Last 1
@@ -64,7 +88,8 @@ $zip = py "$here\build.py" zip | Select-Object -Last 1
 # stay put for a rollback.
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.Substring(0, 16).ToLower()
 $codeKey = "lambda-$hash.zip"
-aws s3 cp $zip "s3://$codeBucket/$codeKey" --region $Region --only-show-errors
+aws s3api put-object --bucket $codeBucket --key $codeKey --body $zip --region $Region `
+    --expected-bucket-owner $account | Out-Null
 
 $overrides = @("CodeBucket=$codeBucket", "CodeKey=$codeKey")
 if ($SetPassword) { $overrides += "PasswordHash=$(py "$here\build.py" hash)" }

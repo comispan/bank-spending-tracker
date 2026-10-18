@@ -21,7 +21,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -558,9 +558,15 @@ def statement_pdf(statement_id: int):
     path = Path(stmt["storage_path"])
     if not path.exists():
         return Response(status_code=404)
+    # The filename came off the uploader's disk: a quote would end the header's
+    # string early, and a non-Latin-1 character cannot go in a header at all.
+    # So a plain-ASCII stand-in, plus the real name percent-encoded (RFC 6266).
+    name = stmt["filename"]
+    plain = "".join(c if " " <= c <= "~" and c not in '"\\' else "_" for c in name)
     return Response(
         path.read_bytes(), media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{stmt["filename"]}"'},
+        headers={"Content-Disposition":
+                 f"inline; filename=\"{plain}\"; filename*=UTF-8''{quote(name, safe='')}"},
     )
 
 

@@ -14,7 +14,9 @@ between invocations, so `data/` lives in /tmp and S3 is the copy of record:
   after. Viewing a PDF fetches it into /tmp on demand.
 
 In front of all of it: a login page checked against a PBKDF2 hash, which sets
-a signed session cookie, and a refusal of cross-site writes. Not HTTP Basic
+a signed session cookie, and a refusal of cross-site writes. The cookie's key
+and a count of recent wrong passwords live under `auth/` in the bucket, so a
+flood of guesses is cut off across every instance. Not HTTP Basic
 auth: a Function URL renames the WWW-Authenticate header on the way out, so
 the browser never shows its sign-in prompt.
 """
@@ -25,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import html
+import json
 import os
 import re
 import sqlite3
@@ -98,11 +101,66 @@ def _check_password(user: str, password: str) -> bool:
     return ok
 
 
+SESSION_KEY = "auth/session-key"
+FAILURES_KEY = "auth/login-failures.json"
+MAX_FAILURES = 10            # wrong passwords allowed per window, across all instances
+FAILURE_WINDOW = 15 * 60
+
+_session_key: bytes | None = None
+
+
+def _secret() -> bytes:
+    """32 random bytes kept in the bucket, made on first use.
+
+    Not in the function's environment: anyone who can read the function's
+    configuration would otherwise be able to mint a session cookie. Here they
+    need the bucket too, which holds the statements anyway."""
+    global _session_key
+    if _session_key is None:
+        try:
+            _session_key = s3.get_object(Bucket=BUCKET, Key=SESSION_KEY)["Body"].read()
+        except ClientError as e:
+            if _code(e) != "NoSuchKey":
+                raise
+            key = os.urandom(32)
+            try:
+                s3.put_object(Bucket=BUCKET, Key=SESSION_KEY, Body=key, IfNoneMatch="*")
+                _session_key = key
+            except ClientError as e2:
+                if _code(e2) not in ("PreconditionFailed", "ConditionalRequestConflict"):
+                    raise
+                # Another instance made one first: use theirs.
+                _session_key = s3.get_object(Bucket=BUCKET, Key=SESSION_KEY)["Body"].read()
+    return _session_key
+
+
 def _sign(expires: int) -> str:
-    # Keyed on the password hash, so changing the password signs out every
-    # browser that had a session — the one way to revoke a stolen cookie.
-    key = hashlib.sha256(b"session|" + os.environ["PASSWORD_HASH"].encode()).digest()
+    # Also keyed on the password hash, so changing the password signs out
+    # every browser that had a session — the one way to revoke a stolen cookie.
+    key = hmac.new(_secret(), b"session|" + os.environ["PASSWORD_HASH"].encode(),
+                   hashlib.sha256).digest()
     return f"{expires}.{hmac.new(key, str(expires).encode(), hashlib.sha256).hexdigest()}"
+
+
+def _recent_failures() -> list[float]:
+    try:
+        raw = s3.get_object(Bucket=BUCKET, Key=FAILURES_KEY)["Body"].read()
+    except ClientError as e:
+        if _code(e) == "NoSuchKey":
+            return []
+        raise
+    try:
+        stamps = [float(t) for t in json.loads(raw)]
+    except (ValueError, TypeError):
+        return []
+    return [t for t in stamps if t > time.time() - FAILURE_WINDOW]
+
+
+def _note_failure(recent: list[float]) -> None:
+    # Read-modify-write without a lock: two guesses at the same instant can
+    # count as one. Close enough to cap guessing at about MAX_FAILURES a window.
+    s3.put_object(Bucket=BUCKET, Key=FAILURES_KEY,
+                  Body=json.dumps(recent + [time.time()]).encode())
 
 
 def _signed_in(event: dict) -> bool:
@@ -117,8 +175,13 @@ def _signed_in(event: dict) -> bool:
 
 
 def _safe_next(target: str) -> str:
-    # Only a path on this site: "//evil.example" would be an open redirect.
-    return target if target.startswith("/") and not target.startswith(("//", "/\\")) else "/"
+    # Only a path on this site: "//evil.example" would be an open redirect. A
+    # browser drops tabs and newlines from a URL and reads "\" as "/", so
+    # "/\t/evil.example" is that same redirect in disguise: refuse any of them.
+    if (not target.startswith("/") or target.startswith("//") or "\\" in target
+            or any(ord(c) < 0x20 or ord(c) == 0x7F for c in target)):
+        return "/"
+    return target
 
 
 def _login_page(target: str, error: str = "", status: int = 200) -> dict:
@@ -154,8 +217,19 @@ def _refuse(event: dict) -> dict | None:
             body = base64.b64decode(body).decode()
         form = {k: v[0] for k, v in parse_qs(body).items()}
         target = _safe_next(form.get("next", "/"))
+        # Checked before the password, so a flood of guesses is turned away
+        # without paying for PBKDF2 on each. A browser already signed in keeps
+        # its session meanwhile; only signing in anew waits.
+        recent = _recent_failures()
+        if len(recent) >= MAX_FAILURES:
+            wait = int(min(recent) + FAILURE_WINDOW - time.time()) // 60 + 1
+            return _login_page(target, f"Too many wrong passwords. Try again in {wait} "
+                                       "minute(s).", 429)
         if not _check_password(form.get("username", ""), form.get("password", "")):
+            _note_failure(recent)
             return _login_page(target, "Wrong username or password.", 401)
+        if recent:
+            s3.delete_object(Bucket=BUCKET, Key=FAILURES_KEY)
         session = _sign(int(time.time()) + SESSION_SECONDS)
         return {"statusCode": 303, "headers": {"Location": target},
                 "cookies": [f"{COOKIE}={session}; Max-Age={SESSION_SECONDS}; Path=/; "

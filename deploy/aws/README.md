@@ -50,6 +50,8 @@ Later, to ship new code: `deploy\aws\deploy.ps1` (password unchanged). To change
 password, add `-SetPassword` again. Other options: `-Region`, `-StackName`,
 `-AuthUser`, `-SetGeminiKey` (tier 3), `-MaxConcurrency 2` (caps what a flood of
 requests could ever cost; new accounts with a 10-instance quota can't reserve any).
+A new stack gets a cap of 2 by itself when the account's quota allows it; the
+script warns on every deploy while there is none.
 
 ## Move your existing statements up
 
@@ -79,6 +81,14 @@ python deploy\aws\data.py pull <DataBucket output>
   try again" page rather than overwriting the first. Unlikely with one user.
 - **Sign out** at `/logout`. Changing the password (`-SetPassword`) signs out every
   browser at once, which is the way to cut off a session you think was copied.
+- **Ten wrong passwords in 15 minutes** pause new sign-ins until the window
+  passes; a browser already signed in carries on. Someone hammering the URL can
+  keep that pause going, so stay signed in on a device you trust. To lift it now,
+  delete `auth/login-failures.json` from the bucket.
+- **`auth/session-key` in the bucket** signs the session cookies. It is made on
+  the first request and is kept out of the function's settings, so reading those
+  settings is not enough to forge a sign-in. Deploying this change signs you out
+  once.
 - **Why a login page, not the browser's own prompt:** a Function URL renames the
   `WWW-Authenticate` header, so HTTP Basic auth never shows its prompt there.
 - **Deleting the stack keeps the bucket** (`DeletionPolicy: Retain`), so your data
