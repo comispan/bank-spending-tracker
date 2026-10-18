@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pdfplumber
 import pypdf
+from pdfplumber.utils.exceptions import PdfminerException
 
 import rows
 
@@ -138,7 +139,19 @@ class ParseResult:
 
 
 def read_pdf(path: Path, password: str | None = None) -> tuple[list[Page], str | None]:
-    """Return (pages, error). Decrypts first if needed."""
+    """Return (pages, error). Decrypts first if needed.
+
+    A file that isn't a readable PDF — truncated, mislabelled, zero bytes with
+    a .pdf name — is an error like any other reject, not an exception: in a
+    bulk upload it must not take the rest of the folder down with it.
+    """
+    try:
+        return _read_pdf(path, password)
+    except (pypdf.errors.PyPdfError, PdfminerException):
+        return [], "not a readable PDF (damaged, or not a PDF at all)"
+
+
+def _read_pdf(path: Path, password: str | None) -> tuple[list[Page], str | None]:
     source, tmp = path, None
 
     reader = pypdf.PdfReader(str(path))
