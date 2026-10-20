@@ -84,8 +84,18 @@ python deploy\aws\data.py pull <DataBucket output>
   `--require-hashes`: a package whose file doesn't match its recorded hash fails the
   build instead of going into the zip. Updates are deliberate: regenerate the lock,
   try it, commit it. boto3 is the one exception — it comes with the Lambda runtime.
-- **Sign out** at `/logout`. Changing the password (`-SetPassword`) signs out every
-  browser at once, which is the way to cut off a session you think was copied.
+- **Sign out** with the button in the header. It signs out **every** browser, not
+  just the one you press it in: it replaces the key the session cookies are signed
+  with, so a cookie you think was copied stops working the moment you sign out.
+  Changing the password (`-SetPassword`) does the same.
+- **Every sign-in is logged.** Each sign-in, wrong password, refused sign-in and
+  sign-out is one JSON line in the function's log group, with the IP and browser
+  (never what was typed). To review them, in CloudWatch Logs Insights:
+  `fields @timestamp, auth, ip, agent | filter ispresent(auth) | sort @timestamp desc`.
+- **Security headers** go on every response: no framing, no MIME sniffing, no
+  referrer to other sites, HTTPS only, and pages are never cached by the browser.
+- **Regex rules use RE2 syntax** (no lookarounds or backreferences), here and
+  locally: RE2 runs in linear time, so no rule can stall the app.
 - **Ten wrong passwords in 15 minutes** pause new sign-ins until the window
   passes; a browser already signed in carries on. Someone hammering the URL can
   keep that pause going, so stay signed in on a device you trust. To lift it now,

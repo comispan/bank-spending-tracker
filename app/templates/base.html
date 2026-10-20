@@ -18,6 +18,12 @@
       <a href="/cards">Cards</a>
       <a href="/rules">Rules &amp; memory</a>
     </nav>
+    {#- Only where there is a sign-in to end: the Lambda handler sets it. #}
+    {% if sign_out %}
+    <form method="post" action="/logout" class="sign-out">
+      <button type="submit" class="tiny danger">Sign out</button>
+    </form>
+    {% endif %}
   </header>
 
   <main>

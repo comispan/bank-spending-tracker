@@ -14,14 +14,17 @@ happens.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
 import re
 import sqlite3
 import sys
 import tempfile
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -44,6 +47,48 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 app = FastAPI(title="Spending Tracker")
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 templates = Jinja2Templates(directory=HERE / "templates")
+
+
+# The notice and error banners travel in the query string of the app's own
+# redirects, so a crafted link could otherwise put any sentence on this app's
+# own page — "session expired, sign in at …" under the real address. Every
+# redirect the app sends is signed on the way out, and a banner arriving
+# without a valid signature is dropped before a route sees it. Per process
+# is enough: a banner is read on the very next request. The Lambda handler
+# replaces this with a key all its instances share.
+BANNER_PARAMS = ("notice", "error")
+banner_key = os.urandom(32)
+
+
+def _banner_sig(path: str, pairs: list[tuple[str, str]]) -> str:
+    said = [[k, v] for k, v in pairs if k in BANNER_PARAMS]
+    return hmac.new(banner_key, json.dumps([path, said]).encode(),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def sign_location(location: str) -> str:
+    """A redirect target with its banner text signed for `path`."""
+    parts = urlsplit(location)
+    pairs = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "sig"]
+    if parts.netloc or not any(k in BANNER_PARAMS for k, _ in pairs):
+        return location
+    pairs.append(("sig", _banner_sig(unquote(parts.path), pairs)))
+    return urlunsplit(("", "", parts.path, urlencode(pairs), parts.fragment))
+
+
+@app.middleware("http")
+async def signed_banners(request: Request, call_next):
+    pairs = parse_qsl(request.scope["query_string"].decode("latin-1"), keep_blank_values=True)
+    if any(k in BANNER_PARAMS or k == "sig" for k, _ in pairs):
+        sig = next((v for k, v in pairs if k == "sig"), "")
+        pairs = [(k, v) for k, v in pairs if k != "sig"]
+        if not hmac.compare_digest(sig, _banner_sig(request.scope["path"], pairs)):
+            pairs = [(k, v) for k, v in pairs if k not in BANNER_PARAMS]
+        request.scope["query_string"] = urlencode(pairs).encode("ascii")
+    response = await call_next(request)
+    if 300 <= response.status_code < 400 and "location" in response.headers:
+        response.headers["location"] = sign_location(response.headers["location"])
+    return response
 
 
 @app.on_event("startup")
@@ -375,7 +420,7 @@ async def upload_bulk(request: Request, files: list[UploadFile]):
     carries a per-file summary so a silent partial success is impossible.
 
     The page's script sends the folder in batches and asks for JSON, then
-    hands the summed counts to `/upload-bulk/done`. One request per folder
+    posts the summed counts to `/upload-bulk/done`. One request per folder
     would not survive a host that caps the request body — Lambda's is 6MB —
     and the plain form post still works without the script.
     """
@@ -395,10 +440,14 @@ async def upload_bulk(request: Request, files: list[UploadFile]):
     return bulk_summary(stored, duplicate, failures)
 
 
-@app.get("/upload-bulk/done")
-def upload_bulk_done(stored: int = 0, duplicate: int = 0,
-                     failure: list[str] = Query(default=[])):
-    """The end of a batched bulk upload: the same summary one post would get."""
+@app.post("/upload-bulk/done")
+def upload_bulk_done(stored: int = Form(0), duplicate: int = Form(0),
+                     failure: list[str] = Form(default=[])):
+    """The end of a batched bulk upload: the same summary one post would get.
+
+    A post, not a link: its `failure` lines become the error banner, and a GET
+    would let any link choose what that banner says. The redirect it answers
+    with is signed like every other (`signed_banners`)."""
     return bulk_summary(stored, duplicate, failure)
 
 
@@ -1015,7 +1064,8 @@ def add_rule(pattern: str = Form(""), match_type: str = Form("contains"),
     # A regex that does not compile would match nothing and say nothing about
     # why, which is the kind of silent no-op this app keeps refusing to ship.
     if match_type == "regex" and not categorize.valid_regex(pattern):
-        return RedirectResponse("/rules?error=That+is+not+a+valid+regex", status_code=303)
+        return redirect("/rules", error="That is not a valid regex. Rules use RE2 syntax: "
+                        "no lookarounds and no backreferences")
 
     with db.connect() as conn:
         db.add_rule(conn, pattern, match_type, category, flow_type, priority)

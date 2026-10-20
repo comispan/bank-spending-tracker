@@ -23,9 +23,20 @@ against the bank statement that also shows it. Reports sum `spend` and net out
 
 from __future__ import annotations
 
+import functools
 import re
 
+import re2
+
 from merchants import merchant_root
+
+# User regex rules run on RE2, not `re`: RE2 matches in time linear in the
+# input, so no pattern can backtrack catastrophically. With `re`, a rule like
+# `(a+)+$` stalls every request that recategorizes — and since that includes
+# the one that would delete the rule, the app could not be talked out of it.
+# The price is RE2's syntax: no lookarounds, no backreferences.
+_RE2_OPTIONS = re2.Options()
+_RE2_OPTIONS.log_errors = False   # a bad pattern is an answer, not a log line
 
 # Fixed in v1, per Section 3: a large taxonomy makes both the user and a model
 # worse at choosing. User-defined categories are v1.1.
@@ -142,22 +153,27 @@ def match_rule(rule, description: str, merchant: str) -> bool:
     if kind == "contains":
         return any(pattern in h for h in haystacks)
     if kind == "regex":
-        try:
-            return any(re.search(pattern, h) for h in haystacks)
-        except re.error:
-            # A rule that no longer compiles must not take the whole page down
-            # with it. It matches nothing until the user fixes it, and
-            # valid_regex() below stops most of them being saved at all.
-            return False
+        compiled = _rule_regex(pattern)
+        # A rule that does not compile must not take the whole page down with
+        # it. It matches nothing until the user fixes it, and valid_regex()
+        # below stops it being saved at all — but a rule saved under `re`,
+        # before the move to RE2, can still be one RE2 refuses.
+        return compiled is not None and any(compiled.search(h) for h in haystacks)
     return False
 
 
-def valid_regex(pattern: str) -> bool:
+@functools.lru_cache(maxsize=256)
+def _rule_regex(pattern: str):
+    """The compiled rule, or None. Cached: recategorizing runs every rule over
+    every row, and RE2 compiles are not cheap."""
     try:
-        re.compile(pattern)
-        return True
-    except re.error:
-        return False
+        return re2.compile(pattern, _RE2_OPTIONS)
+    except re2.error:
+        return None
+
+
+def valid_regex(pattern: str) -> bool:
+    return _rule_regex(pattern.strip().lower()) is not None
 
 
 def resolve(description: str, merchant: str, direction: str,

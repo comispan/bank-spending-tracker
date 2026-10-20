@@ -79,9 +79,17 @@
           }
           done += b.length;
         }
-        var q = new URLSearchParams({stored: total.stored, duplicate: total.duplicate});
-        total.failures.forEach(function (m) { q.append('failure', m); });
-        location.href = '/upload-bulk/done?' + q;
+        var summary = document.createElement('form');
+        summary.method = 'post'; summary.action = '/upload-bulk/done'; summary.hidden = true;
+        var fields = [['stored', total.stored], ['duplicate', total.duplicate]];
+        total.failures.forEach(function (m) { fields.push(['failure', m]); });
+        fields.forEach(function (f) {
+          var input = document.createElement('input');
+          input.type = 'hidden'; input.name = f[0]; input.value = f[1];
+          summary.appendChild(input);
+        });
+        document.body.appendChild(summary);
+        summary.submit();
       });
     })();
   </script>

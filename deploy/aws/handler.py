@@ -19,6 +19,11 @@ and a count of recent wrong passwords live under `auth/` in the bucket, so a
 flood of guesses is cut off across every instance. Not HTTP Basic
 auth: a Function URL renames the WWW-Authenticate header on the way out, so
 the browser never shows its sign-in prompt.
+
+Signing out replaces that key, which ends every session at once — a cookie
+is only a signature, so there is no one session to cross off. Every response
+carries the security headers below, and every sign-in, wrong password and
+sign-out is one JSON line in the function's log.
 """
 
 from __future__ import annotations
@@ -54,6 +59,8 @@ s3 = boto3.client("s3")
 # Lifespan off: Mangum would otherwise run the app's startup — every backfill
 # and a full recategorize — on every invocation. It runs once per container.
 asgi = Mangum(main.app, lifespan="off")
+# Here there is a sign-in, so the app's header gets a button to end it.
+main.templates.env.globals["sign_out"] = True
 
 _etag: str | None = None   # the S3 version our local app.db came from
 _stamp: tuple[int, int] | None = None  # (mtime_ns, size) as last synced
@@ -65,10 +72,10 @@ _started = False
 COOKIE = "tracker_session"
 SESSION_SECONDS = 30 * 24 * 3600
 
-LOGIN_PAGE = """<!doctype html>
+PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in · Spending Tracker</title>
+<title>{title} · Spending Tracker</title>
 <style>
   :root {{ color-scheme: light dark; --bg: #f6f6f4; --card: #fff; --fg: #1d1d1b; --muted: #666; --line: #d8d8d4; --err: #b42318; }}
   @media (prefers-color-scheme: dark) {{ :root {{ --bg: #161616; --card: #202020; --fg: #eee; --muted: #999; --line: #3a3a3a; --err: #f97066; }} }}
@@ -79,15 +86,40 @@ LOGIN_PAGE = """<!doctype html>
   input {{ font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }}
   button {{ font: inherit; padding: 9px; border: 0; border-radius: 6px; background: #2f6f5e; color: #fff; cursor: pointer; }}
   .err {{ color: var(--err); font-size: 14px; margin: 0; }}
+  p {{ margin: 0; color: var(--muted); font-size: 14px; }}
 </style></head>
-<body><form method="post" action="/login">
+<body>{body}</body></html>"""
+
+LOGIN_FORM = """<form method="post" action="/login">
   <h1>Spending Tracker</h1>
   {error}
   <input type="hidden" name="next" value="{next}">
   <label>Username <input name="username" autocomplete="username" required autofocus></label>
   <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
   <button type="submit">Sign in</button>
-</form></body></html>"""
+</form>"""
+
+# What a bare GET of /logout shows. Signing out is a post: as a link, any page
+# could sign you out of every browser with an <img src=".../logout">.
+LOGOUT_FORM = """<form method="post" action="/logout">
+  <h1>Sign out?</h1>
+  <p>This signs out every browser that is signed in, not just this one.</p>
+  <button type="submit">Sign out</button>
+</form>"""
+
+# On every response. The app has no business inside anyone's frame, a file is
+# the type it says it is, and a link out names this site, never its URL: the
+# query strings here carry merchants and filters. `same-origin`, not
+# `no-referrer`: under that, a browser sends `Origin: null` on its own form
+# posts, and the cross-site check below would refuse every one of them.
+SECURITY_HEADERS = {
+    "strict-transport-security": "max-age=31536000",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "content-security-policy": ("frame-ancestors 'none'; base-uri 'none'; "
+                                "form-action 'self'; object-src 'none'"),
+    "referrer-policy": "same-origin",
+}
 
 
 def _check_password(user: str, password: str) -> bool:
@@ -107,31 +139,63 @@ MAX_FAILURES = 10            # wrong passwords allowed per window, across all in
 FAILURE_WINDOW = 15 * 60
 
 _session_key: bytes | None = None
+_session_etag: str | None = None
 
 
-def _secret() -> bytes:
+def _refresh_secret() -> bytes:
     """32 random bytes kept in the bucket, made on first use.
 
     Not in the function's environment: anyone who can read the function's
     configuration would otherwise be able to mint a session cookie. Here they
-    need the bucket too, which holds the statements anyway."""
-    global _session_key
-    if _session_key is None:
+    need the bucket too, which holds the statements anyway.
+
+    Re-read once per request that checks or makes a cookie — a conditional
+    GET, a 304 when nothing moved — because signing out replaces the key, and
+    every warm instance has to stop honouring the old one then, not whenever
+    it happens to be recycled."""
+    global _session_key, _session_etag
+    try:
+        obj = s3.get_object(Bucket=BUCKET, Key=SESSION_KEY,
+                            **({"IfNoneMatch": _session_etag} if _session_etag else {}))
+        _session_key, _session_etag = obj["Body"].read(), obj["ETag"]
+    except ClientError as e:
+        if _code(e) in ("304", "NotModified"):
+            return _session_key
+        if _code(e) != "NoSuchKey":
+            raise
+        key = os.urandom(32)
         try:
-            _session_key = s3.get_object(Bucket=BUCKET, Key=SESSION_KEY)["Body"].read()
-        except ClientError as e:
-            if _code(e) != "NoSuchKey":
+            out = s3.put_object(Bucket=BUCKET, Key=SESSION_KEY, Body=key, IfNoneMatch="*")
+            _session_key, _session_etag = key, out["ETag"]
+        except ClientError as e2:
+            if _code(e2) not in ("PreconditionFailed", "ConditionalRequestConflict"):
                 raise
-            key = os.urandom(32)
-            try:
-                s3.put_object(Bucket=BUCKET, Key=SESSION_KEY, Body=key, IfNoneMatch="*")
-                _session_key = key
-            except ClientError as e2:
-                if _code(e2) not in ("PreconditionFailed", "ConditionalRequestConflict"):
-                    raise
-                # Another instance made one first: use theirs.
-                _session_key = s3.get_object(Bucket=BUCKET, Key=SESSION_KEY)["Body"].read()
+            # Another instance made one first: use theirs.
+            obj = s3.get_object(Bucket=BUCKET, Key=SESSION_KEY)
+            _session_key, _session_etag = obj["Body"].read(), obj["ETag"]
     return _session_key
+
+
+def _secret() -> bytes:
+    """The key as of this request's refresh."""
+    return _session_key if _session_key is not None else _refresh_secret()
+
+
+def _end_all_sessions() -> None:
+    """A new key: every cookie signed with the old one stops verifying."""
+    global _session_key, _session_etag
+    key = os.urandom(32)
+    out = s3.put_object(Bucket=BUCKET, Key=SESSION_KEY, Body=key)
+    _session_key, _session_etag = key, out["ETag"]
+
+
+def _audit(event: dict, what: str) -> None:
+    """One line in the function's log per sign-in event: when, from where,
+    with what browser. Never what was typed — not even the username, which is
+    the password often enough when it goes in the wrong box."""
+    http = event["requestContext"]["http"]
+    print(json.dumps({"auth": what, "ip": http.get("sourceIp"),
+                      "agent": (http.get("userAgent") or "")[:200]}))
 
 
 def _sign(expires: int) -> str:
@@ -165,10 +229,14 @@ def _note_failure(recent: list[float]) -> None:
 
 def _signed_in(event: dict) -> bool:
     # Payload v2 carries cookies in their own list, not in the headers.
-    for cookie in event.get("cookies") or []:
-        name, _, value = cookie.partition("=")
+    ours = [c.partition("=")[2] for c in event.get("cookies") or []
+            if c.partition("=")[0].strip() == COOKIE]
+    if not ours:
+        return False   # no S3 read for a visitor with no cookie at all
+    _refresh_secret()
+    for value in ours:
         expires = value.partition(".")[0]
-        if (name.strip() == COOKIE and expires.isdigit() and int(expires) > time.time()
+        if (expires.isdigit() and int(expires) > time.time()
                 and hmac.compare_digest(value, _sign(int(expires)))):
             return True
     return False
@@ -184,11 +252,29 @@ def _safe_next(target: str) -> str:
     return target
 
 
-def _login_page(target: str, error: str = "", status: int = 200) -> dict:
+def _page(title: str, body: str, status: int = 200) -> dict:
     return {"statusCode": status, "headers": {"Content-Type": "text/html; charset=utf-8",
                                               "Cache-Control": "no-store"},
-            "body": LOGIN_PAGE.format(next=html.escape(target),
-                                      error=f'<p class="err">{error}</p>' if error else "")}
+            "body": PAGE.format(title=title, body=body)}
+
+
+def _login_page(target: str, error: str = "", status: int = 200) -> dict:
+    return _page("Sign in", LOGIN_FORM.format(
+        next=html.escape(target), error=f'<p class="err">{error}</p>' if error else ""), status)
+
+
+def _harden(response: dict, path: str) -> dict:
+    """The security headers, on whatever is going out. Pages are not cached:
+    they are bank statements, and the next person at a shared computer has a
+    back button. The stylesheet is, because its URL changes when it does."""
+    headers = response.setdefault("headers", {})
+    present = {k.lower() for k in headers}
+    for name, value in SECURITY_HEADERS.items():
+        if name not in present:
+            headers[name] = value
+    if "cache-control" not in present and not path.startswith("/static/"):
+        headers["cache-control"] = "no-store"
+    return response
 
 
 def _refuse(event: dict) -> dict | None:
@@ -223,19 +309,30 @@ def _refuse(event: dict) -> dict | None:
         recent = _recent_failures()
         if len(recent) >= MAX_FAILURES:
             wait = int(min(recent) + FAILURE_WINDOW - time.time()) // 60 + 1
+            _audit(event, "sign-in refused: too many wrong passwords")
             return _login_page(target, f"Too many wrong passwords. Try again in {wait} "
                                        "minute(s).", 429)
         if not _check_password(form.get("username", ""), form.get("password", "")):
             _note_failure(recent)
+            _audit(event, "wrong username or password")
             return _login_page(target, "Wrong username or password.", 401)
         if recent:
             s3.delete_object(Bucket=BUCKET, Key=FAILURES_KEY)
+        _refresh_secret()   # sign with the current key, not one a sign-out replaced
         session = _sign(int(time.time()) + SESSION_SECONDS)
+        _audit(event, "signed in")
         return {"statusCode": 303, "headers": {"Location": target},
                 "cookies": [f"{COOKIE}={session}; Max-Age={SESSION_SECONDS}; Path=/; "
                             "Secure; HttpOnly; SameSite=Lax"]}
 
     if path == "/logout":
+        if method != "POST":
+            return _page("Sign out", LOGOUT_FORM)
+        # Only a signed-in browser can end everyone's session; anyone else
+        # just has their own (absent) cookie cleared.
+        if _signed_in(event):
+            _end_all_sessions()
+            _audit(event, "signed out: every session ended")
         return {"statusCode": 303, "headers": {"Location": "/login"},
                 "cookies": [f"{COOKIE}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax"]}
 
@@ -346,10 +443,19 @@ def fetch_pdf(path: str) -> None:
 # ------------------------------------------------------------------ handler
 
 def handler(event: dict, context) -> dict:
+    path = event.get("rawPath", "/")
+    return _harden(_respond(event, context), path)
+
+
+def _respond(event: dict, context) -> dict:
     global _started
     refused = _refuse(event)
     if refused:
         return refused
+    # The app signs its banner text (main.signed_banners). Its own key is per
+    # process; this one is the same on every instance, so a redirect answered
+    # by one and followed to another still shows its notice.
+    main.banner_key = hmac.new(_secret(), b"banners", hashlib.sha256).digest()
 
     pull()
     if not _started:
