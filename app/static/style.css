@@ -71,6 +71,7 @@ header {
 nav a { color: var(--muted); text-decoration: none; margin-right: 1rem; }
 nav a:hover { color: var(--accent); }
 .sign-out { margin: 0 0 0 auto; }
+.sign-out button { white-space: nowrap; }
 
 /* The tables are wider than a phone and the category column made them wider
    still. Scroll them inside the page rather than scrolling the page itself,
