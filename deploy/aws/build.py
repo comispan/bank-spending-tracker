@@ -38,7 +38,12 @@ def build_zip() -> Path:
         # checked against its hash, and nothing pip resolves on its own.
         "--require-hashes", "--no-deps",
         "-r", str(HERE / "requirements-lambda.lock"), "--target", str(pkg),
-        "--platform", "manylinux2014_aarch64", "--implementation", "cp",
+        # Lambda's python3.12 runs on Amazon Linux 2023 (glibc 2.34), so
+        # manylinux_2_28 wheels fit. Naming only manylinux2014 held Pillow and
+        # RE2 back at their last releases with a wheel of that tag — Pillow
+        # with a dozen fixed CVEs. Both tags: some packages ship only the older.
+        "--platform", "manylinux_2_28_aarch64", "--platform", "manylinux2014_aarch64",
+        "--implementation", "cp",
         "--python-version", "3.12", "--only-binary=:all:",
     ], check=True)
 
