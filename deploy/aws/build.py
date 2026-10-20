@@ -5,7 +5,9 @@
 
 The zip is the app/ folder, handler.py, and the dependencies as Linux arm64
 wheels — pip downloads those for the target platform, so this runs the same
-from Windows. Nothing under data/ or .env goes in.
+from Windows. The dependencies come from requirements-lambda.lock, pinned and
+hashed, so the zip only changes when that file does. Nothing under data/ or
+.env goes in.
 """
 
 from __future__ import annotations
@@ -32,7 +34,10 @@ def build_zip() -> Path:
     pkg.mkdir(parents=True)
     subprocess.run([
         sys.executable, "-m", "pip", "install", "--quiet", "--no-warn-conflicts",
-        "-r", str(HERE / "requirements-lambda.txt"), "--target", str(pkg),
+        # The lock, not requirements-lambda.txt: exact versions, each file
+        # checked against its hash, and nothing pip resolves on its own.
+        "--require-hashes", "--no-deps",
+        "-r", str(HERE / "requirements-lambda.lock"), "--target", str(pkg),
         "--platform", "manylinux2014_aarch64", "--implementation", "cp",
         "--python-version", "3.12", "--only-binary=:all:",
     ], check=True)

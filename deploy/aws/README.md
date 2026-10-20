@@ -15,6 +15,7 @@ browser ──HTTPS + session cookie──▶ Lambda Function URL ──▶ hand
 | `template.yaml` | The CloudFormation stack: private versioned bucket, Lambda (arm64), Function URL, role, logs. |
 | `handler.py` | Lambda entry point: login page and session cookie, syncs `app.db` and PDFs with S3, runs the app. |
 | `build.py` | Builds the zip (`zip`) with Linux arm64 wheels, or hashes a password (`hash`). |
+| `requirements-lambda.lock` | The exact dependencies the zip carries, pinned and hashed. Regenerate it with the command at its top after editing `requirements-lambda.txt`. |
 | `deploy.ps1` | Builds, uploads the zip, creates or updates the stack, prints the URL. |
 | `data.py` | Copies `data/` up to the bucket (`push`) or down into `backups/` (`pull`). |
 
@@ -79,6 +80,10 @@ python deploy\aws\data.py pull <DataBucket output>
   download the database, run the startup backfills).
 - **Two writes at the same instant:** the second is refused with a "not saved,
   try again" page rather than overwriting the first. Unlikely with one user.
+- **Dependencies are locked.** The build installs `requirements-lambda.lock` with
+  `--require-hashes`: a package whose file doesn't match its recorded hash fails the
+  build instead of going into the zip. Updates are deliberate: regenerate the lock,
+  try it, commit it. boto3 is the one exception — it comes with the Lambda runtime.
 - **Sign out** at `/logout`. Changing the password (`-SetPassword`) signs out every
   browser at once, which is the way to cut off a session you think was copied.
 - **Ten wrong passwords in 15 minutes** pause new sign-ins until the window

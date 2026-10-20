@@ -1,5 +1,9 @@
 # What the Lambda zip carries: requirements.txt minus uvicorn (Lambda is the
 # server), plus Mangum to hand it requests. boto3 comes with the runtime.
+#
+# The input, not what gets installed: build.py installs requirements-lambda.lock,
+# every package pinned and hashed. After editing this, regenerate the lock with
+# the command at its top (run from deploy/aws/), and commit both.
 fastapi>=0.115
 jinja2>=3.1
 python-multipart>=0.0.9
