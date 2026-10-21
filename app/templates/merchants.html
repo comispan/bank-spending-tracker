@@ -91,6 +91,10 @@
         var stop = form.querySelector('.tier3-stop');
         var progress = form.querySelector('.tier3-progress');
         var stopping = false;
+        // Leaving mid-run ends this loop: the batch in flight still lands, but
+        // the rest are never sent and the summary banner never shows. The
+        // browser's own "Leave site?" prompt makes that a choice, not a slip.
+        function guard(e) { e.preventDefault(); e.returnValue = ''; }
         stop.addEventListener('click', function () {
           stopping = true; stop.disabled = true;
           stop.textContent = 'Stopping after this batch…';
@@ -99,6 +103,7 @@
           e.preventDefault();
           var total = {asked: 0, stored: 0, moved: 0, abstained: 0, failed: 0, problems: []};
           go.disabled = true; stop.hidden = false;
+          window.addEventListener('beforeunload', guard);
           var batches = Math.ceil(keys.length / SIZE), b = 0;
           for (; b < batches && !stopping; b++) {
             var chunk = keys.slice(b * SIZE, (b + 1) * SIZE);
@@ -121,6 +126,7 @@
               total.problems.push('batch ' + (b + 1) + ': ' + err.message);
             }
           }
+          window.removeEventListener('beforeunload', guard);
           progress.textContent = 'Done — loading the results…';
           var summary = document.createElement('form');
           summary.method = 'post'; summary.action = form.action + '/done'; summary.hidden = true;
