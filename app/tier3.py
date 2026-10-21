@@ -57,7 +57,13 @@ TIMEOUT_SECONDS = 120
 # comfortably. The chunking matters at the other end of the range: with a large
 # first-import backlog, a batch that fails the gate takes only its own chunk
 # down with it instead of every merchant in the app.
-BATCH_SIZE = 60
+#
+# 25 rather than the 60 it started at: on 2026-10-21 a 522-merchant backlog
+# sent as nine batches of 60 had seven of them get no answer within 240s.
+# A shorter answer comes back sooner under load, and a batch that still
+# times out strands 25 merchants instead of 60. The cost is more requests
+# against the 5-a-minute quota, which `retry_delay` already waits out.
+BATCH_SIZE = 25
 
 # Measured 2026-08-28 on a free-tier key: the Flash models answer a 43-merchant
 # batch in a few seconds when they answer at all, but return 500 "experiencing
@@ -359,9 +365,12 @@ def ask_gemini(keys: list[str], model: str | None = None,
     for attempt in range(MAX_ATTEMPTS):
         left = MAX_CALL_SECONDS - (time.monotonic() - started)
         if left < 10:
+            # The read timeout of each attempt shrinks to fit, so its figure
+            # varies from batch to batch; the budget is the number that means
+            # something, and one wording lets the banner count repeats.
+            cause = last if last.startswith("HTTP") else "no answer"
             raise Tier3Error(
-                f"Gemini did not answer {len(keys)} merchant(s) within "
-                f"{MAX_CALL_SECONDS}s ({last or 'no response'}). Nothing was stored.")
+                f"Gemini timed out after {MAX_CALL_SECONDS}s ({cause}). Nothing was stored.")
         timeout = min(TIMEOUT_SECONDS, left)
         try:
             with urllib.request.urlopen(build(), timeout=timeout) as response:
@@ -398,8 +407,7 @@ def ask_gemini(keys: list[str], model: str | None = None,
             last = f"no answer within {timeout:.0f}s"
             if attempt == MAX_ATTEMPTS - 1:
                 raise Tier3Error(
-                    f"Gemini did not answer within {timeout:.0f}s for "
-                    f"{len(keys)} merchant(s), after {MAX_ATTEMPTS} attempts. "
+                    f"Gemini timed out after {MAX_ATTEMPTS} attempts (no answer). "
                     f"Nothing was stored.") from e
             continue
         except OSError as e:

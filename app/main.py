@@ -912,19 +912,23 @@ def run_tier3(request: Request, all: int = Form(0), key: list[str] = Form(defaul
         moved = db.recategorize_all(conn) if stored else 0
         conn.commit()
 
+    failed = bool(result["problems"])
     counts = {"asked": len(keys), "stored": stored, "moved": moved,
               "abstained": len(result["abstained"]),
-              "failed": len(keys) if result["problems"] else 0,
-              "problems": result["problems"]}
+              "failed": len(keys) if failed else 0,
+              # One line per batch, however many gate checks it failed, so the
+              # banner can count failed batches by counting lines.
+              "problems": ["; ".join(result["problems"])] if failed else []}
     if wants_json:
         return counts
-    return tier3_summary(back, **counts, left=left)
+    return tier3_summary(back, **counts, left=left, batches=1 if keys else 0)
 
 
 @app.post("/merchants/tier3/done")
 def run_tier3_done(all: int = Form(0), asked: int = Form(0), stored: int = Form(0),
                    moved: int = Form(0), abstained: int = Form(0), failed: int = Form(0),
-                   left: int = Form(0), problem: list[str] = Form(default=[])):
+                   left: int = Form(0), batches: int = Form(0),
+                   problem: list[str] = Form(default=[])):
     """The end of a batched tier-3 run: the banner one long request used to give.
 
     A post rather than a link for the same reason as `/upload-bulk/done`: the
@@ -932,11 +936,11 @@ def run_tier3_done(all: int = Form(0), asked: int = Form(0), stored: int = Form(
     choose what it says."""
     return tier3_summary(f"/merchants{'?all=1' if all else ''}", asked=asked,
                          stored=stored, moved=moved, abstained=abstained,
-                         failed=failed, left=left, problems=problem)
+                         failed=failed, left=left, batches=batches, problems=problem)
 
 
 def tier3_summary(back: str, asked: int, stored: int, moved: int, abstained: int,
-                  failed: int, left: int, problems: list[str]) -> Response:
+                  failed: int, left: int, batches: int, problems: list[str]) -> Response:
     """Everything a run did, because a tier that quietly did nothing looks
     exactly like a tier that had nothing to do."""
     searched = " with Google Search" if tier3.grounding_enabled() else ""
@@ -952,8 +956,17 @@ def tier3_summary(back: str, asked: int, stored: int, moved: int, abstained: int
     # rather than assume the run covered everything.
     error = None
     if problems:
-        error = (f"{failed} merchant(s) in discarded batch(es), nothing stored from "
-                 f"them: " + "; ".join(problems[:3]))
+        # Seven batches timing out is one cause seen seven times: say it once
+        # with a count. Every message ends "Nothing was stored.", which the
+        # lead sentence already says for all of them.
+        seen: dict[str, int] = {}
+        for p in problems:
+            p = p.replace("Nothing was stored.", "").strip().rstrip(".")
+            seen[p] = seen.get(p, 0) + 1
+        causes = "; ".join(f"{p} (×{n})" if n > 1 else p for p, n in list(seen.items())[:3])
+        error = (f"{len(problems)} of {batches} batch(es) failed, so {failed} merchant(s) "
+                 f"are still uncategorized — nothing was stored from those batches, and "
+                 f"pressing the button again retries them. {causes}.")
     return redirect(back, notice=", ".join(parts), error=error)
 
 

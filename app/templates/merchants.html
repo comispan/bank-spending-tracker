@@ -133,6 +133,7 @@
           var fields = [['all', form.elements.all.value], ['asked', total.asked],
                         ['stored', total.stored], ['moved', total.moved],
                         ['abstained', total.abstained], ['failed', total.failed],
+                        ['batches', b],
                         ['left', Math.max(0, keys.length - b * SIZE)]];
           total.problems.forEach(function (m) { fields.push(['problem', m]); });
           fields.forEach(function (f) {
