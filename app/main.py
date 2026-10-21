@@ -918,7 +918,10 @@ def run_tier3(request: Request, all: int = Form(0), key: list[str] = Form(defaul
               "failed": len(keys) if failed else 0,
               # One line per batch, however many gate checks it failed, so the
               # banner can count failed batches by counting lines.
-              "problems": ["; ".join(result["problems"])] if failed else []}
+              "problems": ["; ".join(result["problems"])] if failed else [],
+              # Tells the page's script to stop sending: every later batch
+              # would be refused the same way until the quota resets.
+              "quota": bool(result.get("quota"))}
     if wants_json:
         return counts
     return tier3_summary(back, **counts, left=left, batches=1 if keys else 0)
@@ -927,7 +930,7 @@ def run_tier3(request: Request, all: int = Form(0), key: list[str] = Form(defaul
 @app.post("/merchants/tier3/done")
 def run_tier3_done(all: int = Form(0), asked: int = Form(0), stored: int = Form(0),
                    moved: int = Form(0), abstained: int = Form(0), failed: int = Form(0),
-                   left: int = Form(0), batches: int = Form(0),
+                   left: int = Form(0), batches: int = Form(0), quota: int = Form(0),
                    problem: list[str] = Form(default=[])):
     """The end of a batched tier-3 run: the banner one long request used to give.
 
@@ -936,11 +939,13 @@ def run_tier3_done(all: int = Form(0), asked: int = Form(0), stored: int = Form(
     choose what it says."""
     return tier3_summary(f"/merchants{'?all=1' if all else ''}", asked=asked,
                          stored=stored, moved=moved, abstained=abstained,
-                         failed=failed, left=left, batches=batches, problems=problem)
+                         failed=failed, left=left, batches=batches,
+                         quota=bool(quota), problems=problem)
 
 
 def tier3_summary(back: str, asked: int, stored: int, moved: int, abstained: int,
-                  failed: int, left: int, batches: int, problems: list[str]) -> Response:
+                  failed: int, left: int, batches: int, problems: list[str],
+                  quota: bool = False) -> Response:
     """Everything a run did, because a tier that quietly did nothing looks
     exactly like a tier that had nothing to do."""
     searched = " with Google Search" if tier3.grounding_enabled() else ""
@@ -948,8 +953,18 @@ def tier3_summary(back: str, asked: int, stored: int, moved: int, abstained: int
              f"{moved} transaction(s) moved"]
     if abstained:
         parts.append(f"{abstained} left unknown by the model")
-    if left:
+    if left and not quota:
         parts.append(f"{left} not asked yet — press the button again for the next batch")
+    if quota:
+        # Said first and on its own: it is why the run ended, and "press the
+        # button again" is the wrong advice until midnight Pacific time.
+        tail = "; ".join(p for p in problems if tier3.QUOTA_MESSAGE not in p)
+        error = (f"Stopped: Gemini's daily request quota for this key is used up, so "
+                 f"{failed + left} merchant(s) are still uncategorized. It resets at "
+                 f"midnight Pacific time — press the button again after that, or "
+                 f"categorize them by hand below."
+                 + (f" Earlier batches also failed: {tail}" if tail else ""))
+        return redirect(back, notice=", ".join(parts), error=error)
     # A discarded batch is the failure this whole tier is designed around, so it
     # is reported as an error next to the notice rather than folded into it —
     # those merchants are still uncategorized and the user needs to know that

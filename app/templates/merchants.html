@@ -121,6 +121,9 @@
                 total[f] += out[f];
               });
               total.problems.push.apply(total.problems, out.problems);
+              // The daily quota is gone: every later batch would be refused
+              // the same way, so stop here rather than send them to be.
+              if (out.quota) { total.quota = 1; stopping = true; }
             } catch (err) {
               total.asked += chunk.length; total.failed += chunk.length;
               total.problems.push('batch ' + (b + 1) + ': ' + err.message);
@@ -133,7 +136,7 @@
           var fields = [['all', form.elements.all.value], ['asked', total.asked],
                         ['stored', total.stored], ['moved', total.moved],
                         ['abstained', total.abstained], ['failed', total.failed],
-                        ['batches', b],
+                        ['batches', b], ['quota', total.quota || 0],
                         ['left', Math.max(0, keys.length - b * SIZE)]];
           total.problems.forEach(function (m) { fields.push(['problem', m]); });
           fields.forEach(function (f) {

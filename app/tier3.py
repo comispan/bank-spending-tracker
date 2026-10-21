@@ -58,12 +58,12 @@ TIMEOUT_SECONDS = 120
 # first-import backlog, a batch that fails the gate takes only its own chunk
 # down with it instead of every merchant in the app.
 #
-# 25 rather than the 60 it started at: on 2026-10-21 a 522-merchant backlog
-# sent as nine batches of 60 had seven of them get no answer within 240s.
-# A shorter answer comes back sooner under load, and a batch that still
-# times out strands 25 merchants instead of 60. The cost is more requests
-# against the 5-a-minute quota, which `retry_delay` already waits out.
-BATCH_SIZE = 25
+# 40 is a compromise between two measurements from 2026-10-21. Nine batches of
+# 60 for a 522-merchant backlog had seven get no answer within 240s, which
+# argues for smaller. But the free tier allows 20 requests a day per model,
+# and every batch and every retry is one: at 25 that backlog is 21 requests
+# before a single retry, over the cap. 40 makes it 14, leaving room for some.
+BATCH_SIZE = 40
 
 # Measured 2026-08-28 on a free-tier key: the Flash models answer a 43-merchant
 # batch in a few seconds when they answer at all, but return 500 "experiencing
@@ -272,6 +272,31 @@ class Tier3Error(RuntimeError):
     """The call did not produce a response to gate. Nothing has been written."""
 
 
+class Tier3QuotaError(Tier3Error):
+    """The key's daily request quota is used up. Nothing more can be asked today.
+
+    Its own type because it is the one 429 that waiting does not fix: the
+    per-minute limit clears in a minute, the per-day one at midnight Pacific
+    time. Every later batch would only be refused the same way, so a run
+    stops at this rather than carrying on."""
+
+
+QUOTA_MESSAGE = ("Gemini's daily request quota for this key is used up. It resets at "
+                 "midnight Pacific time (the free tier allows 20 requests a day). "
+                 "Nothing was stored.")
+
+
+def daily_quota_exhausted(body: str) -> bool:
+    """Whether a 429 is the per-day limit rather than the per-minute one.
+
+    Gemini names the quota it hit in the error details — a `quotaId` like
+    `GenerateRequestsPerDayPerProjectPerModel-FreeTier` — and both limits
+    otherwise answer with the same code, status and "retry in Ns". The
+    per-minute one names `PerMinute`, so `PerDay` alone is the signal.
+    """
+    return bool(re.search(r"PerDay", body))
+
+
 def _output_text(body: dict) -> str:
     """The model's answer, out of an Interactions response.
 
@@ -376,8 +401,13 @@ def ask_gemini(keys: list[str], model: str | None = None,
             with urllib.request.urlopen(build(), timeout=timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:400]
-            e._body = detail                                  # for retry_delay
+            body = e.read().decode("utf-8", "replace")
+            detail = body[:400]
+            e._body = body                                    # for retry_delay
+            # The quota that was hit is named in the details, which come after
+            # the message — past the 400 characters kept for display.
+            if e.code == 429 and daily_quota_exhausted(body):
+                raise Tier3QuotaError(QUOTA_MESSAGE) from e
             # A bad key or a rejected schema fails the same way every time, so
             # these are final. The body says which, and surfacing it beats
             # "the call failed".
@@ -496,11 +526,16 @@ def classify(keys: list[str], model: str | None = None,
     abstained: list[str] = []
     problems: list[str] = []
     batches_ok = 0
+    quota = False
 
     for chunk in chunks:
         try:
             raw = ask_gemini(chunk, model=model, key=key, grounding=grounding,
                               examples=examples)
+        except Tier3QuotaError as e:
+            problems.append(str(e))
+            quota = True
+            break
         except Tier3Error as e:
             problems.append(str(e))
             continue
@@ -522,6 +557,9 @@ def classify(keys: list[str], model: str | None = None,
         "asked": len(keys),
         "batches": len(chunks),
         "batches_ok": batches_ok,
+        # The run stopped early on the daily limit; chunks after it were
+        # never sent, and asking again today would only be refused.
+        "quota": quota,
         # Reported rather than assumed, so the caller can say where the names
         # actually went instead of repeating what the setting said at boot.
         "grounding": grounding,

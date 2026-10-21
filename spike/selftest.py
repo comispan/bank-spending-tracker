@@ -1639,6 +1639,39 @@ def test_tier3_retries() -> None:
           isinstance(out, tier3.Tier3Error) and slept == [] and calls == 1,
           f"{out!r} slept={slept}")
 
+    # The free tier's 20-a-day cap answers 429 like the per-minute one does,
+    # "retry in Ns" and all; only the quotaId in the details says which. The
+    # details come after a long message, past what is kept for display.
+    def quota_body(period):
+        return json.dumps({"error": {
+            "code": 429, "status": "RESOURCE_EXHAUSTED",
+            "message": "You exceeded your current quota. " + "x" * 400 + " Please retry in 41.6s.",
+            "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                         "violations": [{"quotaId": f"GenerateRequestsPer{period}"
+                                                    "PerProjectPerModel-FreeTier"}]}]}})
+
+    out, calls, slept = run([http_error(429, quota_body("Day")), good])
+    check("a daily-quota 429 is final: one call, no wait",
+          isinstance(out, tier3.Tier3QuotaError) and calls == 1 and slept == [],
+          f"{out!r} in {calls} call(s), slept={slept}")
+
+    out, calls, _ = run([http_error(429, quota_body("Minute")), good])
+    check("a per-minute 429 is still waited out and retried",
+          out == '{"assignments": []}' and calls == 2, f"{out!r} in {calls} call(s)")
+
+    asked = []
+    def quota_ask(keys, **kw):
+        asked.append(keys)
+        raise tier3.Tier3QuotaError(tier3.QUOTA_MESSAGE)
+    real_ask, tier3.ask_gemini = tier3.ask_gemini, quota_ask
+    try:
+        result = tier3.classify([f"m{i}" for i in range(tier3.BATCH_SIZE * 3)], key="k")
+    finally:
+        tier3.ask_gemini = real_ask
+    check("classify stops at the daily quota instead of sending every chunk",
+          len(asked) == 1 and result["quota"] and result["batches_ok"] == 0,
+          f"{len(asked)} chunk(s) sent, quota={result['quota']}")
+
     # Four full read timeouts are 480s, past the 300s Lambda gives a request.
     # Each one here "takes" its whole timeout on a fake clock, so the call has
     # to stop on the budget rather than on the attempt count.
