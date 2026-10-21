@@ -849,12 +849,15 @@ def merchant_sweep(request: Request, all: int = 0,
         # the user can read rather than a promise they have to take on trust.
         "tier3_payload": tier3.prompt_payload(unknown_keys, unknown_examples),
         "tier3_count": len(unknown_keys),
+        # What the page's script sends, a batch at a time (run_tier3).
+        "tier3_keys": unknown_keys,
+        "tier3_batch": tier3.BATCH_SIZE,
         "error": error, "notice": notice,
     })
 
 
 @app.post("/merchants/tier3")
-def run_tier3(all: int = Form(0)):
+def run_tier3(request: Request, all: int = Form(0), key: list[str] = Form(default=[])):
     """Ask the model about the merchants nothing else knows (Section 3, tier 3).
 
     Explicitly triggered rather than automatic on upload, and that is Section
@@ -862,48 +865,96 @@ def run_tier3(all: int = Form(0)):
     the app makes, so it happens when the user presses the button and not as a
     side effect of filing a statement.
 
-    Results are written as guesses, never as decisions. What comes back is
-    reported in full — categorized, abstained, and any batch the gate threw
-    away — because a tier that quietly did nothing looks exactly like a tier
-    that had nothing to do.
+    **One batch per request.** A first-import backlog is hundreds of merchants,
+    and asking about all of them in one request held the page open for as many
+    model calls as there were batches — long past what a browser waits for or
+    Lambda allows. So the page's script sends the `key`s of one batch at a time
+    and asks for JSON, each batch is stored the moment it passes the gate, and
+    the summed counts go to `/merchants/tier3/done` for the banner, the way a
+    bulk upload does. Stopping halfway, or a batch that fails, keeps every
+    batch already stored.
+
+    The keys are only a selection: anything not currently undecided is dropped,
+    so the request can never send a name the page did not show. Without the
+    script the form posts no keys, and this asks about the first batch and
+    says how many are left.
+
+    Results are written as guesses, never as decisions.
     """
     back = f"/merchants{'?all=1' if all else ''}"
+    wants_json = "application/json" in request.headers.get("accept", "")
 
     with db.connect() as conn:
         unknown = db.merchant_summary(conn, unknown_only=True)
-    keys = [e["key"] for e in unknown]
     examples = {e["key"]: e["example"] for e in unknown}
-    if not keys:
-        return redirect(back, notice="Nothing to ask about — every merchant is categorized")
+    if key:
+        wanted = set(key)
+        keys = [k for k in examples if k in wanted]
+    else:
+        keys = list(examples)
+    keys = keys[:tier3.BATCH_SIZE]
+    left = len(examples) - len(keys)
+
     if not tier3.configured():
-        return redirect(back, error="No Gemini API key. Set GEMINI_API_KEY in the "
-                                    "environment or in a .env file at the project root.")
+        message = ("No Gemini API key. Set GEMINI_API_KEY in the environment or in "
+                   "a .env file at the project root.")
+        if wants_json:
+            return Response(json.dumps({"error": message}), status_code=400,
+                            media_type="application/json")
+        return redirect(back, error=message)
+    if not keys and not wants_json:
+        return redirect(back, notice="Nothing to ask about — every merchant is categorized")
 
-    result = tier3.classify(keys, examples=examples)
-    assignments = result["assignments"]
-
+    result = (tier3.classify(keys, examples=examples) if keys else
+              {"assignments": {}, "abstained": [], "problems": [], "grounding": False})
     with db.connect() as conn:
-        stored = db.remember_llm(conn, assignments)
-        moved = db.recategorize_all(conn)
+        stored = db.remember_llm(conn, result["assignments"])
+        moved = db.recategorize_all(conn) if stored else 0
         conn.commit()
 
-    searched = " with Google Search" if result["grounding"] else ""
-    parts = [f"{stored} merchant(s) categorized by {tier3.model_name()}{searched}",
-             f"{moved} transaction(s) moved"]
-    if result["abstained"]:
-        parts.append(f"{len(result['abstained'])} left unknown by the model")
-    notice = ", ".join(parts)
+    counts = {"asked": len(keys), "stored": stored, "moved": moved,
+              "abstained": len(result["abstained"]),
+              "failed": len(keys) if result["problems"] else 0,
+              "problems": result["problems"]}
+    if wants_json:
+        return counts
+    return tier3_summary(back, **counts, left=left)
 
+
+@app.post("/merchants/tier3/done")
+def run_tier3_done(all: int = Form(0), asked: int = Form(0), stored: int = Form(0),
+                   moved: int = Form(0), abstained: int = Form(0), failed: int = Form(0),
+                   left: int = Form(0), problem: list[str] = Form(default=[])):
+    """The end of a batched tier-3 run: the banner one long request used to give.
+
+    A post rather than a link for the same reason as `/upload-bulk/done`: the
+    `problem` lines become the error banner, and a GET would let any link
+    choose what it says."""
+    return tier3_summary(f"/merchants{'?all=1' if all else ''}", asked=asked,
+                         stored=stored, moved=moved, abstained=abstained,
+                         failed=failed, left=left, problems=problem)
+
+
+def tier3_summary(back: str, asked: int, stored: int, moved: int, abstained: int,
+                  failed: int, left: int, problems: list[str]) -> Response:
+    """Everything a run did, because a tier that quietly did nothing looks
+    exactly like a tier that had nothing to do."""
+    searched = " with Google Search" if tier3.grounding_enabled() else ""
+    parts = [f"{stored} of {asked} merchant(s) categorized by {tier3.model_name()}{searched}",
+             f"{moved} transaction(s) moved"]
+    if abstained:
+        parts.append(f"{abstained} left unknown by the model")
+    if left:
+        parts.append(f"{left} not asked yet — press the button again for the next batch")
     # A discarded batch is the failure this whole tier is designed around, so it
     # is reported as an error next to the notice rather than folded into it —
     # those merchants are still uncategorized and the user needs to know that
     # rather than assume the run covered everything.
     error = None
-    if result["problems"]:
-        error = (f"{result['batches'] - result['batches_ok']} of {result['batches']} "
-                 f"batch(es) discarded, nothing stored from them: "
-                 + "; ".join(result["problems"][:3]))
-    return redirect(back, notice=notice, error=error)
+    if problems:
+        error = (f"{failed} merchant(s) in discarded batch(es), nothing stored from "
+                 f"them: " + "; ".join(problems[:3]))
+    return redirect(back, notice=", ".join(parts), error=error)
 
 
 @app.post("/merchants")

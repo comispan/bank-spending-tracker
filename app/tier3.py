@@ -72,6 +72,12 @@ MAX_ATTEMPTS = 4
 # runs inside a web request. Past this, failing with a legible message beats
 # holding the page open.
 MAX_TOTAL_WAIT_SECONDS = 75
+# The whole of one ask_gemini call, timeouts and retries together. The page
+# sends one batch per request, and on Lambda a request dies at 300 seconds —
+# four attempts at the full read timeout would be 480, and the user would get
+# a gateway error instead of this module's message. Each attempt's timeout
+# shrinks to what is left of this.
+MAX_CALL_SECONDS = 240
 
 # ------------------------------------------------------------------ grounding
 #
@@ -349,9 +355,16 @@ def ask_gemini(keys: list[str], model: str | None = None,
 
     waited = 0.0
     last = ""
+    started = time.monotonic()
     for attempt in range(MAX_ATTEMPTS):
+        left = MAX_CALL_SECONDS - (time.monotonic() - started)
+        if left < 10:
+            raise Tier3Error(
+                f"Gemini did not answer {len(keys)} merchant(s) within "
+                f"{MAX_CALL_SECONDS}s ({last or 'no response'}). Nothing was stored.")
+        timeout = min(TIMEOUT_SECONDS, left)
         try:
-            with urllib.request.urlopen(build(), timeout=TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(build(), timeout=timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
@@ -363,7 +376,9 @@ def ask_gemini(keys: list[str], model: str | None = None,
                 raise Tier3Error(f"Gemini returned HTTP {e.code}: {detail}") from e
             last = f"HTTP {e.code}: {detail}"
             delay = retry_delay(e, attempt)
-            if attempt == MAX_ATTEMPTS - 1 or waited + delay > MAX_TOTAL_WAIT_SECONDS:
+            spent = time.monotonic() - started
+            if (attempt == MAX_ATTEMPTS - 1 or waited + delay > MAX_TOTAL_WAIT_SECONDS
+                    or spent + delay > MAX_CALL_SECONDS - 10):
                 raise Tier3Error(
                     f"Gemini is unavailable after {attempt + 1} attempt(s) — {last}. "
                     f"Nothing was stored.") from e
@@ -380,10 +395,10 @@ def ask_gemini(keys: list[str], model: str | None = None,
         # backstop is here too. An overloaded model is the common cause, and it
         # is worth one more attempt rather than a dead end.
         except TimeoutError as e:
-            last = f"no answer within {TIMEOUT_SECONDS}s"
+            last = f"no answer within {timeout:.0f}s"
             if attempt == MAX_ATTEMPTS - 1:
                 raise Tier3Error(
-                    f"Gemini did not answer within {TIMEOUT_SECONDS}s for "
+                    f"Gemini did not answer within {timeout:.0f}s for "
                     f"{len(keys)} merchant(s), after {MAX_ATTEMPTS} attempts. "
                     f"Nothing was stored.") from e
             continue

@@ -67,10 +67,78 @@
   </p>
   {% endif %}
   {% if tier3_ready %}
-    <form method="post" action="/merchants/tier3">
+    <p class="hint">
+      Sent {{ tier3_batch }} at a time, and each batch is saved the moment it
+      comes back — stopping, or a batch that fails, keeps every one before it.
+    </p>
+    <form method="post" action="/merchants/tier3" id="tier3-form">
       <input type="hidden" name="all" value="{{ 1 if show_all else 0 }}">
       <button type="submit">Send these {{ tier3_count }} names and categorize</button>
+      <button type="button" class="tier3-stop" hidden>Stop after this batch</button>
+      <span class="hint tier3-progress" aria-live="polite"></span>
     </form>
+    <script>
+      // One request per batch rather than one for the lot: hundreds of
+      // merchants are several model calls, and a single request held open for
+      // all of them outlasts the browser and Lambda's 300 seconds. Each batch
+      // answers in JSON and is already stored; the summed counts go to
+      // /merchants/tier3/done for the usual banner. Without this script the
+      // form asks about one batch per press.
+      (function () {
+        var form = document.getElementById('tier3-form');
+        var keys = {{ tier3_keys | tojson }}, SIZE = {{ tier3_batch }};
+        var go = form.querySelector('button[type=submit]');
+        var stop = form.querySelector('.tier3-stop');
+        var progress = form.querySelector('.tier3-progress');
+        var stopping = false;
+        stop.addEventListener('click', function () {
+          stopping = true; stop.disabled = true;
+          stop.textContent = 'Stopping after this batch…';
+        });
+        form.addEventListener('submit', async function (e) {
+          e.preventDefault();
+          var total = {asked: 0, stored: 0, moved: 0, abstained: 0, failed: 0, problems: []};
+          go.disabled = true; stop.hidden = false;
+          var batches = Math.ceil(keys.length / SIZE), b = 0;
+          for (; b < batches && !stopping; b++) {
+            var chunk = keys.slice(b * SIZE, (b + 1) * SIZE);
+            progress.textContent = 'Batch ' + (b + 1) + ' of ' + batches + ' — ' +
+              total.stored + ' categorized so far…';
+            var body = new FormData();
+            body.append('all', form.elements.all.value);
+            chunk.forEach(function (k) { body.append('key', k); });
+            try {
+              var r = await fetch(form.action, {method: 'POST', body: body,
+                                                headers: {Accept: 'application/json'}});
+              var out = await r.json().catch(function () { return null; });
+              if (!r.ok || !out) throw new Error((out && out.error) || 'HTTP ' + r.status);
+              ['asked', 'stored', 'moved', 'abstained', 'failed'].forEach(function (f) {
+                total[f] += out[f];
+              });
+              total.problems.push.apply(total.problems, out.problems);
+            } catch (err) {
+              total.asked += chunk.length; total.failed += chunk.length;
+              total.problems.push('batch ' + (b + 1) + ': ' + err.message);
+            }
+          }
+          progress.textContent = 'Done — loading the results…';
+          var summary = document.createElement('form');
+          summary.method = 'post'; summary.action = form.action + '/done'; summary.hidden = true;
+          var fields = [['all', form.elements.all.value], ['asked', total.asked],
+                        ['stored', total.stored], ['moved', total.moved],
+                        ['abstained', total.abstained], ['failed', total.failed],
+                        ['left', Math.max(0, keys.length - b * SIZE)]];
+          total.problems.forEach(function (m) { fields.push(['problem', m]); });
+          fields.forEach(function (f) {
+            var input = document.createElement('input');
+            input.type = 'hidden'; input.name = f[0]; input.value = f[1];
+            summary.appendChild(input);
+          });
+          document.body.appendChild(summary);
+          summary.submit();
+        });
+      })();
+    </script>
   {% else %}
     <p class="empty">
       No API key configured, so nothing can be sent. Set

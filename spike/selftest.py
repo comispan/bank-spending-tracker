@@ -1639,6 +1639,30 @@ def test_tier3_retries() -> None:
           isinstance(out, tier3.Tier3Error) and slept == [] and calls == 1,
           f"{out!r} slept={slept}")
 
+    # Four full read timeouts are 480s, past the 300s Lambda gives a request.
+    # Each one here "takes" its whole timeout on a fake clock, so the call has
+    # to stop on the budget rather than on the attempt count.
+    clock, timeouts = [0.0], []
+    def slow_urlopen(request, timeout=None):
+        timeouts.append(timeout)
+        clock[0] += timeout
+        raise TimeoutError("timed out")
+    real_open, real_mono = urllib.request.urlopen, tier3.time.monotonic
+    tier3.urllib.request.urlopen = slow_urlopen
+    tier3.time.monotonic = lambda: clock[0]
+    try:
+        tier3.ask_gemini(["grab"], key="k")
+        out = None
+    except tier3.Tier3Error as e:
+        out = e
+    finally:
+        tier3.urllib.request.urlopen = real_open
+        tier3.time.monotonic = real_mono
+    check("one call stays inside MAX_CALL_SECONDS, timeouts and all",
+          isinstance(out, tier3.Tier3Error) and clock[0] <= tier3.MAX_CALL_SECONDS
+          and "Nothing was stored" in str(out),
+          f"{out!r} after {clock[0]}s, timeouts={timeouts}")
+
 
 def test_statement_sort() -> None:
     """Ordering the statement list (`db.STATEMENT_ORDERS`, `main.sort_headers`).
