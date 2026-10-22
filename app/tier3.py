@@ -50,6 +50,13 @@ ALLOWED = set(CATEGORIES) | {ABSTAIN}
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 API_REVISION = "2026-05-20"
 DEFAULT_MODEL = "gemini-3.8-flash"
+# Asked instead when the model above answers 429. Rate limits are per model, so
+# a key that has used up Flash's requests — per minute or for the day — still
+# has Flash-Lite's, and a batch answered by the smaller model beats one left
+# for tomorrow. It is not graded the way DEFAULT_MODEL is (TIER3.md), which is
+# why the banner says how many merchants it answered. GEMINI_FALLBACK_MODEL
+# picks another; `none` turns the fallback off.
+FALLBACK_MODEL = "gemini-3.1-flash-lite"
 TIMEOUT_SECONDS = 120
 
 # Merchants per request. One call for the whole batch is what Section 3
@@ -232,6 +239,15 @@ def model_name() -> str:
     return _setting("GEMINI_MODEL") or DEFAULT_MODEL
 
 
+def fallback_model_name() -> str | None:
+    """The model a rate-limited batch goes to, or None when there is none to
+    go to: turned off, or the same model that was just refused."""
+    name = _setting("GEMINI_FALLBACK_MODEL") or FALLBACK_MODEL
+    if name.lower() == "none" or name == model_name():
+        return None
+    return name
+
+
 def grounding_enabled() -> bool:
     """Whether tier 3 hands the model Google Search. Off unless asked for.
 
@@ -272,7 +288,12 @@ class Tier3Error(RuntimeError):
     """The call did not produce a response to gate. Nothing has been written."""
 
 
-class Tier3QuotaError(Tier3Error):
+class Tier3RateLimited(Tier3Error):
+    """A 429 the caller asked to hear about at once rather than wait out:
+    `classify` has another model to send the batch to instead."""
+
+
+class Tier3QuotaError(Tier3RateLimited):
     """The key's daily request quota is used up. Nothing more can be asked today.
 
     Its own type because it is the one 429 that waiting does not fix: the
@@ -339,7 +360,8 @@ def retry_delay(error: urllib.error.HTTPError, attempt: int) -> float:
 def ask_gemini(keys: list[str], model: str | None = None,
                key: str | None = None, thinking: str = "low",
                grounding: bool | None = None,
-               examples: dict[str, str] | None = None) -> str:
+               examples: dict[str, str] | None = None,
+               fail_fast_on_429: bool = False) -> str:
     """One batch out to Gemini, raw response text back. No parsing, no writing.
 
     Temperature is deliberately left at the model default: Google's guidance for
@@ -349,6 +371,10 @@ def ask_gemini(keys: list[str], model: str | None = None,
 
     `grounding=None` takes the configured default; True and False force it, so
     the eval can grade both without editing the environment it is measuring.
+
+    `fail_fast_on_429` raises `Tier3RateLimited` on a per-minute 429 instead
+    of waiting it out — for a caller with another model to try, where waiting
+    up to a minute for this one would only be slower.
     """
     key = key or api_key()
     if not key:
@@ -408,6 +434,8 @@ def ask_gemini(keys: list[str], model: str | None = None,
             # the message — past the 400 characters kept for display.
             if e.code == 429 and daily_quota_exhausted(body):
                 raise Tier3QuotaError(QUOTA_MESSAGE) from e
+            if e.code == 429 and fail_fast_on_429:
+                raise Tier3RateLimited(f"Gemini returned HTTP 429: {detail}") from e
             # A bad key or a rejected schema fails the same way every time, so
             # these are final. The body says which, and surfacing it beats
             # "the call failed".
@@ -522,28 +550,56 @@ def classify(keys: list[str], model: str | None = None,
     chunks = [keys[i:i + BATCH_SIZE] for i in range(0, len(keys), BATCH_SIZE)]
     grounding = grounding_enabled() if grounding is None else grounding
 
+    primary = model or model_name()
+    # Only when the caller left the model to the app: an eval that names a
+    # model is measuring that one, and a quiet switch would grade another.
+    fallback = fallback_model_name() if model is None else None
+
     assignments: dict[str, str] = {}
     abstained: list[str] = []
     problems: list[str] = []
     batches_ok = 0
     quota = False
+    by_fallback = 0
 
     for chunk in chunks:
         try:
-            raw = ask_gemini(chunk, model=model, key=key, grounding=grounding,
-                              examples=examples)
-        except Tier3QuotaError as e:
-            problems.append(str(e))
-            quota = True
-            break
+            raw = ask_gemini(chunk, model=primary, key=key, grounding=grounding,
+                              examples=examples, fail_fast_on_429=fallback is not None)
+            answered_by = primary
+        except Tier3RateLimited as e:          # the daily quota included
+            if fallback is None:
+                problems.append(str(e))
+                if isinstance(e, Tier3QuotaError):
+                    quota = True
+                    break
+                continue
+            raw = None
         except Tier3Error as e:
             problems.append(str(e))
             continue
+        if raw is None:
+            # Rate-limited, per minute or for the day: the same batch, at once,
+            # to a model with limits of its own. Its own 429s are waited out
+            # as usual, and its daily quota ends the run as the first's would.
+            try:
+                raw = ask_gemini(chunk, model=fallback, key=key, grounding=grounding,
+                                 examples=examples)
+                answered_by = fallback
+            except Tier3QuotaError as e:
+                problems.append(str(e))
+                quota = True
+                break
+            except Tier3Error as e:
+                problems.append(f"{primary} was rate-limited, and {fallback}: {e}")
+                continue
         ok, batch_problems, answers = gate(raw, chunk)
         if not ok:
             problems.extend(batch_problems)
             continue
         batches_ok += 1
+        if answered_by != primary:
+            by_fallback += len(chunk)
         for merchant, category in answers.items():
             if category == ABSTAIN:
                 abstained.append(merchant)
@@ -560,6 +616,10 @@ def classify(keys: list[str], model: str | None = None,
         # The run stopped early on the daily limit; chunks after it were
         # never sent, and asking again today would only be refused.
         "quota": quota,
+        # Merchants whose batch the fallback model answered, so the banner can
+        # say so: those answers come from a model the eval did not grade.
+        "fallback_model": fallback,
+        "by_fallback": by_fallback,
         # Reported rather than assumed, so the caller can say where the names
         # actually went instead of repeating what the setting said at boot.
         "grounding": grounding,

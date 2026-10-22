@@ -1458,7 +1458,8 @@ def test_tier3_client() -> None:
     grounded: list[bool] = []
     seen_examples: list[dict[str, str] | None] = []
 
-    def fake_ask(chunk, model=None, key=None, thinking="low", grounding=False, examples=None):
+    def fake_ask(chunk, model=None, key=None, thinking="low", grounding=False, examples=None,
+                 **_):
         calls.append(list(chunk))
         grounded.append(grounding)
         seen_examples.append(examples)
@@ -1669,8 +1670,90 @@ def test_tier3_retries() -> None:
     finally:
         tier3.ask_gemini = real_ask
     check("classify stops at the daily quota instead of sending every chunk",
-          len(asked) == 1 and result["quota"] and result["batches_ok"] == 0,
-          f"{len(asked)} chunk(s) sent, quota={result['quota']}")
+          len(asked) == 2 and result["quota"] and result["batches_ok"] == 0,
+          f"{len(asked)} call(s), quota={result['quota']}")
+
+    # The fallback (FALLBACK_MODEL). A 429 from the configured model sends the
+    # same batch, at once, to a model with rate limits of its own.
+    out, calls, slept = [None], [0], []
+    def fast_run(outcomes):
+        seen = []
+        def fake_urlopen(request, timeout=None):
+            seen.append(json.loads(request.data)["model"])
+            outcome = outcomes[len(seen) - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return io.BytesIO(outcome.encode())
+        real_open, real_sleep = urllib.request.urlopen, tier3.time.sleep
+        real_flag = tier3.grounding_enabled
+        tier3.urllib.request.urlopen = fake_urlopen
+        tier3.time.sleep = lambda s: slept.append(s)
+        tier3.grounding_enabled = lambda: False
+        try:
+            return tier3.classify([f"m{i}" for i in range(tier3.BATCH_SIZE + 1)], key="k"), seen
+        finally:
+            tier3.urllib.request.urlopen = real_open
+            tier3.time.sleep = real_sleep
+            tier3.grounding_enabled = real_flag
+
+    def answer(*merchants):
+        text = json.dumps({"assignments": [{"merchant": m, "category": "Dining"}
+                                           for m in merchants]})
+        return json.dumps({"steps": [{"type": "model_output",
+                                      "content": [{"type": "text", "text": text}]}]})
+    first = [f"m{i}" for i in range(tier3.BATCH_SIZE)]
+    primary, fallback = tier3.model_name(), tier3.fallback_model_name()
+    check("the fallback is Flash-Lite unless configured otherwise",
+          fallback == "gemini-3.1-flash-lite" or bool(tier3._setting("GEMINI_FALLBACK_MODEL")),
+          repr(fallback))
+
+    slept.clear()
+    result, seen = fast_run([http_error(429, "Please retry in 20s."), answer(*first),
+                             answer(f"m{tier3.BATCH_SIZE}")])
+    check("a per-minute 429 goes to the fallback at once, without waiting",
+          seen == [primary, fallback, primary] and slept == []
+          and result["batches_ok"] == 2 and not result["problems"],
+          f"models={seen} slept={slept} problems={result['problems']}")
+    check("...and the result says how many merchants it answered",
+          result["by_fallback"] == tier3.BATCH_SIZE and result["fallback_model"] == fallback,
+          f"{result['by_fallback']} by {result['fallback_model']}")
+
+    result, seen = fast_run([http_error(429, quota_body("Day")), answer(*first),
+                             answer(f"m{tier3.BATCH_SIZE}")])
+    check("a daily-quota 429 also goes to the fallback, and the run carries on",
+          seen == [primary, fallback, primary] and not result["quota"]
+          and result["batches_ok"] == 2, f"models={seen} quota={result['quota']}")
+
+    result, seen = fast_run([http_error(429, quota_body("Day")),
+                             http_error(429, quota_body("Day"))])
+    check("both models out for the day: the run stops after two calls",
+          seen == [primary, fallback] and result["quota"] and result["batches_ok"] == 0,
+          f"models={seen} quota={result['quota']}")
+
+    result, seen = fast_run([http_error(500, "high demand"), answer(*first),
+                             answer(f"m{tier3.BATCH_SIZE}")])
+    check("a 500 is retried on the same model, not sent to the fallback",
+          seen == [primary, primary, primary] and result["by_fallback"] == 0, repr(seen))
+
+    asked_models = []
+    def model_ask(keys, model=None, **kw):
+        asked_models.append(model)
+        raise tier3.Tier3RateLimited("429")
+    real_ask, tier3.ask_gemini = tier3.ask_gemini, model_ask
+    try:
+        tier3.classify(["grab"], model="gemini-x", key="k")
+    finally:
+        tier3.ask_gemini = real_ask
+    check("a model named by the caller (the eval) gets no fallback",
+          asked_models == ["gemini-x"], repr(asked_models))
+
+    real_setting = tier3._setting
+    tier3._setting = lambda name: "none" if name == "GEMINI_FALLBACK_MODEL" else real_setting(name)
+    try:
+        off = tier3.fallback_model_name()
+    finally:
+        tier3._setting = real_setting
+    check("GEMINI_FALLBACK_MODEL=none turns the fallback off", off is None, repr(off))
 
     # Four full read timeouts are 480s, past the 300s Lambda gives a request.
     # Each one here "takes" its whole timeout on a fake clock, so the call has

@@ -101,7 +101,7 @@
         });
         form.addEventListener('submit', async function (e) {
           e.preventDefault();
-          var total = {asked: 0, stored: 0, moved: 0, abstained: 0, failed: 0, problems: []};
+          var total = {asked: 0, stored: 0, moved: 0, abstained: 0, failed: 0, by_fallback: 0, problems: []};
           go.disabled = true; stop.hidden = false;
           window.addEventListener('beforeunload', guard);
           var batches = Math.ceil(keys.length / SIZE), b = 0;
@@ -117,7 +117,7 @@
                                                 headers: {Accept: 'application/json'}});
               var out = await r.json().catch(function () { return null; });
               if (!r.ok || !out) throw new Error((out && out.error) || 'HTTP ' + r.status);
-              ['asked', 'stored', 'moved', 'abstained', 'failed'].forEach(function (f) {
+              ['asked', 'stored', 'moved', 'abstained', 'failed', 'by_fallback'].forEach(function (f) {
                 total[f] += out[f];
               });
               total.problems.push.apply(total.problems, out.problems);
@@ -136,7 +136,7 @@
           var fields = [['all', form.elements.all.value], ['asked', total.asked],
                         ['stored', total.stored], ['moved', total.moved],
                         ['abstained', total.abstained], ['failed', total.failed],
-                        ['batches', b], ['quota', total.quota || 0],
+                        ['batches', b], ['quota', total.quota || 0], ['by_fallback', total.by_fallback],
                         ['left', Math.max(0, keys.length - b * SIZE)]];
           total.problems.forEach(function (m) { fields.push(['problem', m]); });
           fields.forEach(function (f) {

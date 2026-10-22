@@ -921,7 +921,8 @@ def run_tier3(request: Request, all: int = Form(0), key: list[str] = Form(defaul
               "problems": ["; ".join(result["problems"])] if failed else [],
               # Tells the page's script to stop sending: every later batch
               # would be refused the same way until the quota resets.
-              "quota": bool(result.get("quota"))}
+              "quota": bool(result.get("quota")),
+              "by_fallback": result.get("by_fallback", 0)}
     if wants_json:
         return counts
     return tier3_summary(back, **counts, left=left, batches=1 if keys else 0)
@@ -931,7 +932,7 @@ def run_tier3(request: Request, all: int = Form(0), key: list[str] = Form(defaul
 def run_tier3_done(all: int = Form(0), asked: int = Form(0), stored: int = Form(0),
                    moved: int = Form(0), abstained: int = Form(0), failed: int = Form(0),
                    left: int = Form(0), batches: int = Form(0), quota: int = Form(0),
-                   problem: list[str] = Form(default=[])):
+                   by_fallback: int = Form(0), problem: list[str] = Form(default=[])):
     """The end of a batched tier-3 run: the banner one long request used to give.
 
     A post rather than a link for the same reason as `/upload-bulk/done`: the
@@ -940,16 +941,26 @@ def run_tier3_done(all: int = Form(0), asked: int = Form(0), stored: int = Form(
     return tier3_summary(f"/merchants{'?all=1' if all else ''}", asked=asked,
                          stored=stored, moved=moved, abstained=abstained,
                          failed=failed, left=left, batches=batches,
-                         quota=bool(quota), problems=problem)
+                         quota=bool(quota), problems=problem, by_fallback=by_fallback)
 
 
 def tier3_summary(back: str, asked: int, stored: int, moved: int, abstained: int,
                   failed: int, left: int, batches: int, problems: list[str],
-                  quota: bool = False) -> Response:
+                  quota: bool = False, by_fallback: int = 0) -> Response:
     """Everything a run did, because a tier that quietly did nothing looks
     exactly like a tier that had nothing to do."""
     searched = " with Google Search" if tier3.grounding_enabled() else ""
-    parts = [f"{stored} of {asked} merchant(s) categorized by {tier3.model_name()}{searched}",
+    # The model that actually answered is named, never just the configured
+    # one: a fallback answer comes from a model the eval did not grade, and is
+    # worth a closer look on the list below.
+    model, fallback = tier3.model_name(), tier3.fallback_model_name()
+    if by_fallback and by_fallback >= asked:
+        by = f"{fallback} ({model} was rate-limited)"
+    elif by_fallback:
+        by = f"{model} — {by_fallback} of them by {fallback}, after a rate limit"
+    else:
+        by = model
+    parts = [f"{stored} of {asked} merchant(s) categorized by {by}{searched}",
              f"{moved} transaction(s) moved"]
     if abstained:
         parts.append(f"{abstained} left unknown by the model")

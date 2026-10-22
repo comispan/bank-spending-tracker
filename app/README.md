@@ -228,6 +228,16 @@ Off unless you configure a key. Set `GEMINI_API_KEY` in the environment or in a
 `.env` file at the project root (already gitignored), then use the panel on
 `/merchants`. Override the model with `GEMINI_MODEL` if you want a different one.
 
+**Rate limits fall back to Flash-Lite.** Rate limits are per model, so when the
+model answers HTTP 429 — its per-minute limit or the free tier's 20 requests a
+day — the same batch goes straight to `gemini-3.1-flash-lite` instead of waiting
+or stopping. Only a 429 does this; a 500 or a timeout is retried on the same
+model as before. The banner names the model that actually answered, and the run
+stops on the daily quota only when Flash-Lite's is gone too. Flash-Lite has not
+been graded against the eval set, so give its answers a look. Set
+`GEMINI_FALLBACK_MODEL` to use another model, or to `none` to turn it off. The
+eval never falls back: it grades the model you name.
+
 **Grade it before you trust it.** The merchants you categorized by hand are the
 answer key, and `spike/eval_categories.py` scores a candidate against them with
 the model's answers hidden:
