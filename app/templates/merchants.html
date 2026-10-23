@@ -16,7 +16,7 @@
     <strong>{{ stats.categorized }} of {{ stats.total }}</strong> transactions
     categorized ({{ (100 * stats.categorized / stats.total) | round | int }}%)
     {% if not show_all %}
-      · <strong>{{ entries|length }}</strong> merchant(s) left to decide,
+      · <strong>{{ total_entries }}</strong> merchant(s) left to decide,
       worth <strong>{{ unknown_value_minor | money }}</strong> of spending
     {% endif %}
   </p>
@@ -167,10 +167,24 @@
     {% endif %}
   </p>
 {% else %}
+{% macro pager() %}
+  {% if pages > 1 %}
+  <div class="pager" role="navigation" aria-label="Merchant pages">
+    {% if page > 1 %}<a href="{{ page_url(page - 1) }}">‹ Previous</a>{% endif %}
+    {% for p in range(1, pages + 1) %}
+      <a href="{{ page_url(p) }}"{% if p == page %} class="on" aria-current="page"{% endif %}>{{ p }}</a>
+    {% endfor %}
+    {% if page < pages %}<a href="{{ page_url(page + 1) }}">Next ›</a>{% endif %}
+    <span class="hint">merchants {{ first_shown }}–{{ first_shown + entries|length - 1 }} of {{ total_entries }}</span>
+  </div>
+  {% endif %}
+{% endmacro %}
+{{ pager() }}
 <form method="post" action="/merchants" id="merchant-form">
   <input type="hidden" name="all" value="{{ 1 if show_all else 0 }}">
+  <input type="hidden" name="page" value="{{ page }}">
   <p class="sticky-save">
-    <button type="submit">Save all</button>
+    <button type="submit">Save {{ 'this page' if pages > 1 else 'all' }}</button>
     <span class="hint">
       Merchants that share a first word are listed together — they are often one
       shop the statement spells two ways. They are never merged for you here:
@@ -217,8 +231,30 @@
     {% endfor %}
     </tbody>
   </table>
-  <p class="sticky-save"><button type="submit">Save all</button></p>
+  <p class="sticky-save"><button type="submit">Save {{ 'this page' if pages > 1 else 'all' }}</button></p>
 </form>
+{{ pager() }}
+<script>
+  // Post only the rows whose choice changed. Every row otherwise sends its
+  // key and its select — a backlog of hundreds is over a thousand fields —
+  // and an untouched row that shows a model's guess would be re-saved as your
+  // own decision just by pressing Save. Without this script every row posts.
+  document.getElementById('merchant-form').addEventListener('submit', function (e) {
+    e.currentTarget.querySelectorAll('select[name=category]').forEach(function (s) {
+      var initial = Array.from(s.options).find(function (o) { return o.defaultSelected; });
+      if (s.value === (initial ? initial.value : '')) {
+        s.disabled = true;
+        s.parentNode.querySelector('input[name=key]').disabled = true;
+      }
+    });
+  });
+  // Back/forward can restore the page with those rows still disabled.
+  window.addEventListener('pageshow', function () {
+    document.querySelectorAll('#merchant-form [disabled]').forEach(function (el) {
+      el.disabled = false;
+    });
+  });
+</script>
 
 <p class="hint">
   This screen sets categories only. Whether a row was a purchase, a refund or a

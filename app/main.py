@@ -814,14 +814,30 @@ def analytics(request: Request, month: list[str] = Query(default=[])):
     return templates.TemplateResponse(request, "analytics.html", {"a": data, "cards": cards})
 
 
+# Merchants a page of the sweep shows. A first import is hundreds, and one
+# screen of all of them is slow to scroll, slow to render and one Save away
+# from posting the lot.
+MERCHANT_PAGE_SIZE = 100
+
+
+def merchants_url(all: int | bool, page: int = 1) -> str:
+    """The sweep, keeping the view and the page a form was posted from."""
+    params = {k: v for k, v in (("all", 1 if all else None),
+                                ("page", page if page > 1 else None)) if v}
+    return f"/merchants?{urlencode(params)}" if params else "/merchants"
+
+
 @app.get("/merchants", response_class=HTMLResponse)
-def merchant_sweep(request: Request, all: int = 0,
+def merchant_sweep(request: Request, all: int = 0, page: int = 1,
                    error: str | None = None, notice: str | None = None):
     """Categorize by merchant instead of by transaction.
 
     The fastest route to a complete report, and it needs no model: the rows that
     are uncategorized are far fewer merchants than they look, so one decision
     here settles every past and future transaction from that merchant at once.
+
+    Paged at `MERCHANT_PAGE_SIZE`, in the same order as before, so the figures
+    at the top still describe every merchant and the table only the slice.
     """
     with db.connect() as conn:
         entries = db.merchant_summary(conn, unknown_only=not all)
@@ -835,8 +851,17 @@ def merchant_sweep(request: Request, all: int = 0,
     # opaque key like `2c2` means nothing on its own, and the example is often
     # what lets the model (or a human) place it at all.
     unknown_examples = {e["key"]: e["example"] for e in unknown}
+    # A page past the end — the last page emptied by a save, say — shows the
+    # last one that exists rather than an empty table.
+    pages = max(1, -(-len(entries) // MERCHANT_PAGE_SIZE))
+    page = min(max(page, 1), pages)
+    first = (page - 1) * MERCHANT_PAGE_SIZE
     return templates.TemplateResponse(request, "merchants.html", {
-        "entries": entries, "stats": stats, "show_all": bool(all),
+        "entries": entries[first:first + MERCHANT_PAGE_SIZE],
+        "total_entries": len(entries),
+        "page": page, "pages": pages, "first_shown": first + 1,
+        "page_url": lambda p: merchants_url(all, p),
+        "stats": stats, "show_all": bool(all),
         "categories": categorize.CATEGORIES,
         "unknown_value_minor": sum(e["value_minor"] or 0 for e in entries if e["unknown"]),
         "tier3_ready": tier3.configured(),
@@ -999,19 +1024,26 @@ def tier3_summary(back: str, asked: int, stored: int, moved: int, abstained: int
 @app.post("/merchants")
 def save_merchant_categories(key: list[str] = Form(default=[]),
                              category: list[str] = Form(default=[]),
-                             all: int = Form(0)):
-    """Apply a whole screen of merchant decisions at once.
+                             all: int = Form(0), page: int = Form(1)):
+    """Apply one page of merchant decisions at once.
 
     The two lists arrive index-matched because every row emits exactly one
     hidden `key` and one `category`, in document order. Blank categories mean
     "left alone" and are dropped here rather than being written as nulls.
+
+    One page, not the whole backlog: two fields a row on a page of
+    `MERCHANT_PAGE_SIZE` stays far inside the 1000 fields Starlette parses by
+    default, which an unpaged 522-merchant screen went past. The page's script
+    also posts only the rows whose choice changed, so an untouched model guess
+    is never re-saved as the user's own decision.
     """
+    back = merchants_url(all, page)
     pairs = [(k, c) for k, c in zip(key, category) if k and c]
     unknown = sorted({c for _, c in pairs if c not in categorize.CATEGORIES})
     if unknown:
-        return RedirectResponse("/merchants?error=Unknown+category", status_code=303)
+        return redirect(back, error="Unknown category")
     if not pairs:
-        return RedirectResponse("/merchants?notice=Nothing+to+save", status_code=303)
+        return redirect(back, notice="Nothing to save")
 
     with db.connect() as conn:
         for merchant, chosen in pairs:
@@ -1021,8 +1053,10 @@ def save_merchant_categories(key: list[str] = Form(default=[]),
         moved = db.recategorize_all(conn)
         conn.commit()
 
+    # Back to the same page number. In the undecided view the saved merchants
+    # have left the list, so that page now holds the next ones to decide.
     note = f"{len(pairs)} merchant(s) saved, {moved} transaction(s) categorized"
-    return redirect(f"/merchants{'?all=1' if all else ''}", notice=note)
+    return redirect(back, notice=note)
 
 
 @app.get("/merchants/groups", response_class=HTMLResponse)
