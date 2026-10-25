@@ -2129,6 +2129,12 @@ def test_transaction_page() -> None:
     check("an empty slice is one page of nothing",
           empty["total"] == 0 and empty["pages"] == 1 and empty["rows"] == [], repr(empty))
 
+    # Analytics drills through to the months on its page, not just one.
+    both = db.transaction_page(conn, month=["2026-01", "2026-02"], page=1, per_page=100)
+    check("several months is the union of them", both["total"] == 251, both["total"])
+    feb = db.transaction_page(conn, month=["2026-02"], page=1, per_page=100)
+    check("a one-month list is that month", feb["total"] == 1, feb["total"])
+
 
 def test_analytics() -> None:
     """`db.analytics` — the month breakdowns across every *complete* month.

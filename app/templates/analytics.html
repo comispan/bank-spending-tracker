@@ -147,17 +147,20 @@
    the month-by-month grid, where a fold inside a fold inside a dense table is
    more structure than the row is worth. #}
 {% macro label(r, kind, expand=false) %}
+  {#- The months on the page ride along, so the list a row opens is the slice
+      its figure was summed over and not the row's whole history. -#}
+  {%- set mq = '&' ~ months_qs(a.months) -%}
   {%- if kind == 'card' and cards.get(r.label) -%}
-    <a href="/transactions?account={{ cards[r.label] }}">{{ r.label }}</a>
+    <a href="/transactions?account={{ cards[r.label] }}{{ mq }}">{{ r.label }}</a>
   {%- elif kind == 'merchant' and r.members -%}
-    <a href="/transactions?merchant_group={{ r.label | urlencode }}">{{ r.label }}</a>
+    <a href="/transactions?merchant_group={{ r.label | urlencode }}{{ mq }}">{{ r.label }}</a>
     {%- if expand -%}
     <details class="outlets">
       <summary>{{ r.members | length }} outlets</summary>
       <ul>
         {% for m in r.members %}
         <li>
-          <a href="/transactions?merchant={{ m.key | urlencode }}"><code>{{ m.key }}</code></a>
+          <a href="/transactions?merchant={{ m.key | urlencode }}{{ mq }}"><code>{{ m.key }}</code></a>
           <span class="num">{{ m.v | money }}</span>
           <span class="muted">{{ m.n }} rows</span>
         </li>
@@ -166,11 +169,11 @@
     </details>
     {%- endif -%}
   {%- elif kind == 'merchant' -%}
-    <a href="/transactions?merchant={{ r.label | urlencode }}"><code>{{ r.label }}</code></a>
+    <a href="/transactions?merchant={{ r.label | urlencode }}{{ mq }}"><code>{{ r.label }}</code></a>
   {%- elif kind == 'category' -%}
-    <a href="/transactions?category={{ r.label | urlencode }}">{{ r.label }}</a>
+    <a href="/transactions?category={{ r.label | urlencode }}{{ mq }}">{{ r.label }}</a>
   {%- elif kind == 'flow' -%}
-    <a href="/transactions?flow={{ r.label | urlencode }}"><span class="flowtag {{ r.label }}">{{ r.label }}</span></a>
+    <a href="/transactions?flow={{ r.label | urlencode }}{{ mq }}"><span class="flowtag {{ r.label }}">{{ r.label }}</span></a>
   {%- else -%}{{ r.label }}{%- endif -%}
 {% endmacro %}
 

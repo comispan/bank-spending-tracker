@@ -171,6 +171,22 @@ def asset_version(name: str) -> str:
         return "0"
 
 
+def months_label(months: list[str]) -> str | None:
+    """`2025-01 → 2025-12` for an unbroken run, the months themselves otherwise.
+
+    A picked set can skip months, and a range over a gap would claim rows the
+    filter does not include.
+    """
+    if not months:
+        return None
+    if len(months) == 1:
+        return months[0]
+    idx = [int(ym[:4]) * 12 + int(ym[5:]) for ym in months]
+    if idx[-1] - idx[0] == len(idx) - 1:
+        return f"{months[0]} → {months[-1]}"
+    return ", ".join(months)
+
+
 def months_qs(months: list[str]) -> str:
     """`month=2025-01&month=2025-02` — the analytics month picker as a link.
 
@@ -650,7 +666,7 @@ def delete_all():
 
 @app.get("/transactions", response_class=HTMLResponse)
 def all_transactions(request: Request, error: str | None = None, notice: str | None = None,
-                     uncategorized: int = 0, month: str | None = None,
+                     uncategorized: int = 0, month: list[str] = Query(default=[]),
                      category: str | None = None, account: int | None = None,
                      merchant: str | None = None, merchant_group: str | None = None,
                      flow: str | None = None, page: int = 1):
@@ -667,8 +683,9 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
     `db.transaction_page`, so a report figure still reconciles against what the
     page says even when the slice runs to many pages.
     """
-    if month and not re.fullmatch(r"\d{4}-\d{2}", month):
-        month = None
+    # Repeated, as on /analytics: a row there drills through to the months it
+    # was summed over. One month is still the month page's link.
+    month = sorted({ym for ym in month if re.fullmatch(r"\d{4}-\d{2}", ym)})
     if category and category not in categorize.CATEGORIES and category != "(uncategorized)":
         category = None
     if flow and flow not in categorize.FLOW_TYPES:
@@ -683,7 +700,8 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
         # card that replaced another shows both cards' rows, and the chip has
         # to say so.
         lineage = db.card_lineages(conn).get(account) if account else None
-    active = [("month", month, month), ("category", category, category),
+    active = [("month" if len(month) == 1 else "months", month, months_label(month)),
+              ("category", category, category),
               ("account", account, lineage["label"] if lineage else None),
               ("merchant", merchant, merchant),
               # Named differently from `merchant` on purpose: a company row and
@@ -697,11 +715,13 @@ def all_transactions(request: Request, error: str | None = None, notice: str | N
         "filters": [(k, v, label) for k, v, label in active if v],
         # Filters only — the page number is added to links separately, so a
         # filter change always lands back on page 1 rather than off the end.
-        "query": urlencode({k: v for k, v in
-                            [("month", month), ("category", category), ("account", account),
+        "query": urlencode([(k, v) for k, v in
+                            [*(("month", ym) for ym in month),
+                             ("category", category), ("account", account),
                              ("merchant", merchant), ("merchant_group", merchant_group),
                              ("flow", flow),
-                             ("uncategorized", uncategorized or None)] if v}),
+                             ("uncategorized", uncategorized or None)] if v]),
+        "months": month,
         "shown_minor": result["shown_minor"],
         "categories": categorize.CATEGORIES, "flow_types": categorize.FLOW_TYPES,
         "error": error, "notice": notice,

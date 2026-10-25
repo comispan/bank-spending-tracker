@@ -860,7 +860,7 @@ TXN_PAGE_SIZE = 100
 
 
 def transaction_page(conn: sqlite3.Connection, *, uncategorized: bool = False,
-                     month: str | None = None, category: str | None = None,
+                     month: str | list[str] | None = None, category: str | None = None,
                      account: int | None = None, merchant: str | None = None,
                      merchant_group: str | None = None,
                      flow: str | None = None, page: int = 1,
@@ -878,8 +878,12 @@ def transaction_page(conn: sqlite3.Connection, *, uncategorized: bool = False,
     if uncategorized or category == "(uncategorized)":
         clauses.append("t.category IS NULL")
     if month:
-        clauses.append("substr(t.txn_date, 1, 7) = ?")
-        args.append(month)
+        # Several months is where the analytics page drills through to: the
+        # row's figure was summed over the months on that page, not one.
+        months = [month] if isinstance(month, str) else list(month)
+        clauses.append(
+            f"substr(t.txn_date, 1, 7) IN ({', '.join('?' * len(months))})")
+        args += months
     if category and category != "(uncategorized)":
         clauses.append("t.category = ?")
         args.append(category)

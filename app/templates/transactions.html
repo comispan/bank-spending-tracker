@@ -30,8 +30,10 @@
   </p>
   <p class="tiers">
     <a href="/transactions">clear filters</a>
-    {%- if 'month' in filters | map(attribute=0) %} ·
-      <a href="/months/{{ filters | selectattr(0, 'eq', 'month') | map(attribute=1) | first }}">back to the month</a>
+    {%- if months | length == 1 %} ·
+      <a href="/months/{{ months[0] }}">back to the month</a>
+    {%- elif months %} ·
+      <a href="/analytics?{{ months_qs(months) }}">back to analytics</a>
     {%- endif %}
   </p>
 </section>
