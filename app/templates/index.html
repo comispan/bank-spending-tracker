@@ -30,7 +30,11 @@
 <section class="card">
   <h1>Upload a statement</h1>
   <form method="post" action="/upload" enctype="multipart/form-data" class="upload">
-    <input type="file" name="file" accept="application/pdf" required>
+    {#- No `accept` filter: given a PDF-only one, iOS Safari skips its
+        Photos/Files menu for the Files picker alone, and on some iPhones that
+        picker never opens. The PDF check is the script below and the server
+        (`.pdf` name, then a parse). #}
+    <input type="file" name="file" required>
     <input type="password" name="password" placeholder="PDF password (only if locked)" autocomplete="off">
     <button type="submit">Upload &amp; parse</button>
   </form>
@@ -41,9 +45,23 @@
 
   <h2 class="bulk-heading">Bulk upload</h2>
   <form method="post" action="/upload-bulk" enctype="multipart/form-data" class="upload" id="bulk-upload">
-    <input type="file" name="files" accept="application/pdf" multiple required>
+    <input type="file" name="files" multiple required>
     <button type="submit">Upload all</button>
   </form>
+  <script>
+    // The PDF check the picker no longer makes. A pick with anything else in
+    // it fails the form's validation, so neither form submits and the browser
+    // names the files. The server checks again either way.
+    document.querySelectorAll('form.upload input[type=file]').forEach(function (input) {
+      input.addEventListener('change', function () {
+        var bad = Array.from(input.files).filter(function (f) {
+          return !/\.pdf$/i.test(f.name);
+        }).map(function (f) { return f.name; });
+        input.setCustomValidity(bad.length ? 'Only PDF files can be uploaded. Not a PDF: ' + bad.join(', ') : '');
+        if (bad.length) input.reportValidity();
+      });
+    });
+  </script>
   <script>
     // A folder goes up in batches of a few MB, not one request: a host that
     // caps the request body (Lambda: 6MB) would refuse the whole folder. Each
