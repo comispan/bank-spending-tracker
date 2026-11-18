@@ -2328,30 +2328,45 @@ def test_sanity_checks() -> None:
 
 
 def test_issuer_detection() -> None:
-    """Page 1 names other banks in its transaction lines — a UOB card paid off
-    from a DBS account reads "DBS Visa Direct" — so the issuer is the bank
-    named most, not the first one in ISSUERS that appears at all.
+    """Layout-independent issuer detection: transaction rows name other banks
+    (a UOB card paid off by "DBS Visa Direct") and are ignored; a bank's own
+    domain or legal name outweighs bare mentions.
     """
     print("\nissuer detection")
     from parsing import Page, detect_issuer
 
-    def pages(*lines: str) -> list:
-        text = "\n".join(lines)
-        return [Page(number=1, text=text, char_count=len(text))]
+    def pages(*texts: str) -> list:
+        return [Page(number=i + 1, text=t, char_count=len(t)) for i, t in enumerate(texts)]
 
-    uob = pages(
+    def lines(*ls: str) -> str:
+        return "\n".join(ls)
+
+    def got(ps, filename="x.pdf"):
+        return detect_issuer(ps, filename)
+
+    uob = pages(lines(
+        "Email card.centre@uobgroup.com",
         "UOB ONE CARD                4265-XXXX-XXXX-1234",
-        "PREVIOUS BALANCE                                   4,549.20",
         "19 OCT  17 OCT  DBS Visa Direct                    4,549.20 CR",
-        "TOTAL BALANCE FOR UOB ONE CARD                     3,335.30",
-        "United Overseas Bank Limited - 80 Raffles Place UOB Plaza",
-    )
-    check("a UOB statement with a DBS payment line is UOB", detect_issuer(uob, "x.pdf") == "UOB",
-          detect_issuer(uob, "x.pdf"))
-    dbs = pages("DBS Cards", "DBS LIVE FRESH CARD", "  01 OCT  FUND TRANSFER TO UOB   50.00")
-    check("a DBS statement mentioning UOB once is DBS", detect_issuer(dbs, "x.pdf") == "DBS")
+    ))
+    check("a DBS payment row doesn't make a UOB statement DBS", got(uob) == "UOB", got(uob))
+
+    only_row = pages(lines("Statement of Account", "01 OCT  FAST TRANSFER TO OCBC   50.00"))
+    check("a bank named only in a transaction row is not the issuer",
+          got(only_row, "my-card.pdf") == "My Card", got(only_row, "my-card.pdf"))
+
+    marked = pages(lines(
+        "Pay via OCBC or UOB internet banking, or at any OCBC branch",
+        "DBS Bank Ltd  Co. Reg. No. 196800306E  www.dbs.com.sg",
+    ))
+    check("a legal name and domain outweigh bare mentions of other banks",
+          got(marked) == "DBS", got(marked))
+
+    cover = pages("Your e-Statement is enclosed", lines("Credit Card Statement", "www.ocbc.com"))
+    check("a page 1 that names no bank widens to the rest", got(cover) == "OCBC", got(cover))
+
     check("no bank named falls back to the filename",
-          detect_issuer(pages("nothing here"), "my-card_oct.pdf") == "My Card Oct")
+          got(pages("nothing here"), "my-card_oct.pdf") == "My Card Oct")
 
 
 def test_row_parse_notes() -> None:

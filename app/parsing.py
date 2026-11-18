@@ -42,28 +42,52 @@ TXN_DATE = re.compile(
 TXN_AMOUNT = re.compile(r"\d{1,3}(?:,\d{3})*\.\d{2}\s*(?:cr|dr)?\s*$", re.I)
 
 # Issuer detection. rows.py deliberately doesn't guess at this — it parses what
-# is printed, and the issuer is printed as a logo as often as as text. A short
-# keyword list over the first page is honest about what it is, and the fallback
-# is the filename rather than a wrong guess.
+# is printed, and the issuer is printed as a logo as often as as text. Layouts
+# differ per bank and change with every redesign, so nothing here depends on
+# where text sits on the page. It leans on two things every statement has:
+#
+#   * Transaction rows never identify the issuer. They are where *other* banks
+#     turn up — a UOB card paid off by "DBS Visa Direct", a "FAST TRANSFER TO
+#     OCBC" — so date-and-amount lines are dropped before matching.
+#   * Every bank prints its own identity marks: its web and email domains and
+#     its registered legal name (required on the statement). Those are strong
+#     evidence; a bare name mention is weak.
+#
+# The issuer is the best-scoring bank; the fallback is the filename rather than
+# a wrong guess. Each entry: (name, mention pattern, identity-mark pattern).
 ISSUERS = [
-    ("DBS", r"\bDBS\b|\bPOSB\b"),
-    ("UOB", r"\bUOB\b|United Overseas Bank"),
-    ("OCBC", r"\bOCBC\b|Oversea-Chinese"),
-    ("Standard Chartered", r"Standard Chartered|\bSCB\b"),
-    ("Citibank", r"\bCiti(?:bank)?\b"),
-    ("HSBC", r"\bHSBC\b"),
-    ("Maybank", r"\bMaybank\b"),
-    ("American Express", r"American Express|\bAMEX\b"),
-    ("Trust", r"\bTrust Bank\b|\bTrust\b"),
-    ("MariBank", r"\bMari ?Bank\b|\bMARI CREDIT\b"),
+    ("DBS", r"\bDBS\b|\bPOSB\b",
+     r"\bdbs\.com\b|\bposb\.com\b|DBS Bank Ltd"),
+    ("UOB", r"\bUOB\b|United Overseas Bank",
+     r"\buob\.com\b|\buobgroup\.com\b|United Overseas Bank Limited"),
+    ("OCBC", r"\bOCBC\b|Oversea-Chinese",
+     r"\bocbc\.com\b|Oversea-Chinese Banking Corporation"),
+    ("Standard Chartered", r"Standard Chartered|\bSCB\b",
+     r"\bsc\.com\b|Standard Chartered Bank \(Singapore\)"),
+    ("Citibank", r"\bCiti(?:bank)?\b",
+     r"\bcitibank\.com\b|Citibank Singapore Limited"),
+    ("HSBC", r"\bHSBC\b",
+     r"\bhsbc\.com\b|HSBC Bank \(Singapore\) Limited"),
+    ("Maybank", r"\bMaybank\b",
+     r"\bmaybank(?:2u)?\.com\b|Malayan Banking Berhad|Maybank Singapore Limited"),
+    ("American Express", r"American Express|\bAMEX\b",
+     r"\bamericanexpress\.com\b|American Express International"),
+    ("Trust", r"\bTrust Bank\b|\bTrust\b",
+     r"\btrustbank\.sg\b|Trust Bank Singapore Limited"),
+    ("MariBank", r"\bMari ?Bank\b|\bMARI CREDIT\b",
+     r"\bmaribank\.sg\b|MariBank Singapore"),
     # The demo's invented issuers (demo.py), so a demo statement files under
     # the bank printed on it rather than under its filename. `\s+` because the
     # heading is set large and layout mode pads the gap to match.
-    ("Meridian Bank", r"\bMeridian\s+Bank\b"),
-    ("Harbour Bank", r"\bHarbour\s+Bank\b"),
-    ("Northgate Bank", r"\bNorthgate\s+Bank\b"),
+    ("Meridian Bank", r"\bMeridian\s+Bank\b", None),
+    ("Harbour Bank", r"\bHarbour\s+Bank\b", None),
+    ("Northgate Bank", r"\bNorthgate\s+Bank\b", None),
 ]
-ISSUER_RE = [(name, re.compile(pat, re.I)) for name, pat in ISSUERS]
+ISSUER_RE = [
+    (name, re.compile(mention, re.I), re.compile(mark, re.I) if mark else None)
+    for name, mention, mark in ISSUERS
+]
+IDENTITY_MARK_WEIGHT = 5          # one domain or legal name outweighs a handful of mentions
 
 
 def sha256(data: bytes) -> str:
@@ -192,16 +216,30 @@ def _read_pdf(path: Path, password: str | None) -> tuple[list[Page], str | None]
     return pages, None
 
 
+def issuer_scores(text: str) -> dict[str, int]:
+    """Score each known bank on `text`, ignoring transaction-shaped lines."""
+    kept = "\n".join(
+        line for line in text.splitlines()
+        if not (TXN_DATE.match(line) and TXN_AMOUNT.search(line))
+    )
+    scores = {}
+    for name, mention, mark in ISSUER_RE:
+        score = len(mention.findall(kept))
+        if mark:
+            score += IDENTITY_MARK_WEIGHT * len(mark.findall(kept))
+        if score:
+            scores[name] = score
+    return scores
+
+
 def detect_issuer(pages: list[Page], filename: str) -> str:
-    # Count, don't take the first hit: transaction lines name other banks too
-    # (a UOB card paid off by "DBS Visa Direct"), so the issuer is whichever
-    # bank page 1 names most — its own header, card name and footer. Ties keep
-    # list order, as before.
-    head = "\n".join(p.text for p in pages[:1])
-    counts = [(len(pat.findall(head)), -i, name) for i, (name, pat) in enumerate(ISSUER_RE)]
-    hits, _, name = max(counts)
-    if hits:
-        return name
+    # Page 1 carries the header, summary and footer; only if it names no bank
+    # at all (a cover page, a logo-only header) widen to the whole statement.
+    for text in ("\n".join(p.text for p in pages[:1]), "\n".join(p.text for p in pages)):
+        scores = issuer_scores(text)
+        if scores:
+            # max() keeps the first of equal scores, i.e. ISSUERS order.
+            return max(scores, key=scores.get)
     return Path(filename).stem.replace("-", " ").replace("_", " ").title()
 
 
