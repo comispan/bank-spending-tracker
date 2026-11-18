@@ -2327,6 +2327,48 @@ def test_sanity_checks() -> None:
     check("empty statement flagged", any("no transactions" in w for w in r2.warnings))
 
 
+def test_issuer_detection() -> None:
+    """Layout-independent issuer detection: transaction rows name other banks
+    (a UOB card paid off by "DBS Visa Direct") and are ignored; a bank's own
+    domain or legal name outweighs bare mentions.
+    """
+    print("\nissuer detection")
+    from parsing import Page, detect_issuer
+
+    def pages(*texts: str) -> list:
+        return [Page(number=i + 1, text=t, char_count=len(t)) for i, t in enumerate(texts)]
+
+    def lines(*ls: str) -> str:
+        return "\n".join(ls)
+
+    def got(ps, filename="x.pdf"):
+        return detect_issuer(ps, filename)
+
+    uob = pages(lines(
+        "Email card.centre@uobgroup.com",
+        "UOB ONE CARD                4265-XXXX-XXXX-1234",
+        "19 OCT  17 OCT  DBS Visa Direct                    4,549.20 CR",
+    ))
+    check("a DBS payment row doesn't make a UOB statement DBS", got(uob) == "UOB", got(uob))
+
+    only_row = pages(lines("Statement of Account", "01 OCT  FAST TRANSFER TO OCBC   50.00"))
+    check("a bank named only in a transaction row is not the issuer",
+          got(only_row, "my-card.pdf") == "My Card", got(only_row, "my-card.pdf"))
+
+    marked = pages(lines(
+        "Pay via OCBC or UOB internet banking, or at any OCBC branch",
+        "DBS Bank Ltd  Co. Reg. No. 196800306E  www.dbs.com.sg",
+    ))
+    check("a legal name and domain outweigh bare mentions of other banks",
+          got(marked) == "DBS", got(marked))
+
+    cover = pages("Your e-Statement is enclosed", lines("Credit Card Statement", "www.ocbc.com"))
+    check("a page 1 that names no bank widens to the rest", got(cover) == "OCBC", got(cover))
+
+    check("no bank named falls back to the filename",
+          got(pages("nothing here"), "my-card_oct.pdf") == "My Card Oct")
+
+
 def test_row_parse_notes() -> None:
     """`main.row_parse_notes` — the map from an aggregate parse warning to the
     rows it is actually about, which is what the statement table marks.
@@ -2359,6 +2401,7 @@ if __name__ == "__main__":
     test_no_call_site_bypasses_the_helpers()
     test_encryption_paths()
     test_row_detection()
+    test_issuer_detection()
     test_row_parsing()
     test_month_coverage()
     test_cycle_dates()
