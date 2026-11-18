@@ -2327,6 +2327,33 @@ def test_sanity_checks() -> None:
     check("empty statement flagged", any("no transactions" in w for w in r2.warnings))
 
 
+def test_issuer_detection() -> None:
+    """Page 1 names other banks in its transaction lines — a UOB card paid off
+    from a DBS account reads "DBS Visa Direct" — so the issuer is the bank
+    named most, not the first one in ISSUERS that appears at all.
+    """
+    print("\nissuer detection")
+    from parsing import Page, detect_issuer
+
+    def pages(*lines: str) -> list:
+        text = "\n".join(lines)
+        return [Page(number=1, text=text, char_count=len(text))]
+
+    uob = pages(
+        "UOB ONE CARD                4265-XXXX-XXXX-1234",
+        "PREVIOUS BALANCE                                   4,549.20",
+        "19 OCT  17 OCT  DBS Visa Direct                    4,549.20 CR",
+        "TOTAL BALANCE FOR UOB ONE CARD                     3,335.30",
+        "United Overseas Bank Limited - 80 Raffles Place UOB Plaza",
+    )
+    check("a UOB statement with a DBS payment line is UOB", detect_issuer(uob, "x.pdf") == "UOB",
+          detect_issuer(uob, "x.pdf"))
+    dbs = pages("DBS Cards", "DBS LIVE FRESH CARD", "  01 OCT  FUND TRANSFER TO UOB   50.00")
+    check("a DBS statement mentioning UOB once is DBS", detect_issuer(dbs, "x.pdf") == "DBS")
+    check("no bank named falls back to the filename",
+          detect_issuer(pages("nothing here"), "my-card_oct.pdf") == "My Card Oct")
+
+
 def test_row_parse_notes() -> None:
     """`main.row_parse_notes` — the map from an aggregate parse warning to the
     rows it is actually about, which is what the statement table marks.
@@ -2359,6 +2386,7 @@ if __name__ == "__main__":
     test_no_call_site_bypasses_the_helpers()
     test_encryption_paths()
     test_row_detection()
+    test_issuer_detection()
     test_row_parsing()
     test_month_coverage()
     test_cycle_dates()

@@ -193,10 +193,15 @@ def _read_pdf(path: Path, password: str | None) -> tuple[list[Page], str | None]
 
 
 def detect_issuer(pages: list[Page], filename: str) -> str:
+    # Count, don't take the first hit: transaction lines name other banks too
+    # (a UOB card paid off by "DBS Visa Direct"), so the issuer is whichever
+    # bank page 1 names most — its own header, card name and footer. Ties keep
+    # list order, as before.
     head = "\n".join(p.text for p in pages[:1])
-    for name, pat in ISSUER_RE:
-        if pat.search(head):
-            return name
+    counts = [(len(pat.findall(head)), -i, name) for i, (name, pat) in enumerate(ISSUER_RE)]
+    hits, _, name = max(counts)
+    if hits:
+        return name
     return Path(filename).stem.replace("-", " ").replace("_", " ").title()
 
 
